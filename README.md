@@ -57,7 +57,7 @@ Inherited from the S8 port and verified on an S8, not yet re-verified on the Not
 
 ## Known bugs
 
-- **Touch works on the Note 8, then wedges after a few minutes of use.** Taps land, but after ~7 min of use the IC's event port stops answering (`event read failed (1)…(256)`) while the rest of the system stays healthy; a forced reboot restores it. The init sequence is solved (LPM exit, chip-specific reset, `0x61`/`SENSE_ON`); the wedge is diagnosed in [docs/roadmap.md](docs/roadmap.md) phase T1, with the recovery retry and the diagnostics flashed to the phone.
+- **Touch works on the Note 8, then wedges after a few minutes of use.** Taps land, but after a few minutes the touch IC stops answering altogether: the i2c address phase never completes (`stage write-done`, INT_STATUS `0x0`), so even the IC's own reset command fails. The rest of the system stays healthy and a reboot restores touch. The init sequence is solved (LPM exit, chip-specific reset, `0x61`/`SENSE_ON`); the wedge is tracked in [docs/roadmap.md](docs/roadmap.md) phase T1, and the current build dumps the controller, clock and pin registers at the failure.
 - **Battery capacity is wrong for this phone.** The kernel hard-codes `SWEET_BAT_MAH 3000` (the S8's battery); the Note 8 has 3300 mAh, so percentages and capacities are off.
 - **The S Pen is not supported** (Wacom W9018 is not wired into HID).
 - **Very slow and laggy.** All rendering is on the CPU, there is no GPU. The Note 8 images still run `cpus=4` at the default A53 clock; the S8 daily image already runs 8 cores with A53 1690 / Mongoose 1703 MHz, and the Note 8 has not been tried at those settings yet.

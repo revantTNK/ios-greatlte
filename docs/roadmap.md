@@ -83,27 +83,27 @@ next* things rather than starting from zero.
 
 ### T1 Touch reliability (now)
 
-- [measured 2026-10-23] After the last good event the driver logs
-  `event read failed (1)..(8)` then `(256)` and never recovers; `0x62`
-  CLEAR_EVENT_STACK does not clear it; the battery on the other I2C bus still reads
-  on the same line as `(256)`, so it is the touch bus/IC, not the SoC. A reboot fixes
-  it, so it is a runtime wedge.
-- The flashed build (`greatlte-ts-diag-boot.img`, kernel `adf1c124…`, CI
-  `39960479295`) now prints the failing i2c stage and raw INT_STATUS, probes the IC
-  (`0xaf`/`0x22`) while events fail, retries the y661 reset ladder every 64 failures,
-  and no longer drops the IC's status/boot-complete events.
-- Next, by what the ring shows:
-  - IC answers the probe but `0x60` stalls -> the event port/IC firmware is stuck:
-    keep the reset ladder, and treat an event-stack overflow as the trigger (the
-    previous wedge followed a 63-event backlog).
-  - Nothing answers at all -> the bus or the IC died: add a controller recovery
-    (clock the bus out, re-init USI) and, if the IC follows panel power, re-init it
-    from the display off/on hook.
-  - A boot-complete/watchdog event arrives -> the IC reset itself; the status-event
-    path already re-inits, so this becomes "recover in ~1 s" instead of "wedge".
-- Then: multi-touch ids (10), edge gestures for the home indicator, and moving reads
-  from 8 ms polling to the gpa1-0 interrupt (plan.md W5). Latency measured with a
-  scripted tap and the HID timestamp.
+- [measured 2026-10-23] The wedge is the IC becoming **unaddressable**: the failure
+  is in the i2c *write/address* phase (`stage write-done`) with INT_STATUS `0x0` -
+  no TRANS_DONE and none of the abort/no-ack/no-device/timeout bits - and every
+  later transfer fails the same way, including the IC's own `0x42`/`0x12` reset, so
+  an IC-side ladder can never recover it. The battery on the other i2c bus keeps
+  working on the same line, and a reboot restores touch: a runtime wedge of the
+  controller/clock/pads (or the IC), not damage.
+- [measured] The first diagnostic image also carried a bug of ours: it dispatched
+  events with the wrong id test (`ev[0] & 3 == 0` is *coordinate*, not status), so
+  every finger event was dropped and touch was dead from boot. Fixed in `3cdd1421e`
+  along with consuming the boot-complete event and capping IC re-inits (4 per boot,
+  60 s apart).
+- [next] `3cdd1421e` (run 39989588696) dumps the loader's USI09 registers at the
+  wedge - controller CTL/TRAILING/INT_EN/INT_STATUS/FIFO_STATUS, CONF/AUTO_CONF/
+  TRANS_STATUS/TIMEOUT/ADDR, PCLK/SCLK/USER_MUX/SYSREG, TOP mux/div/gate, GPE3
+  CON/DAT/PUD, GPA1 DAT - and then re-asserts them (`s8ts_bus_recover()`): the only
+  recovery open to us while the IC cannot be written to. That decides between
+  controller/clock gating and a pad/IC fault.
+- Stretch, once the wedge is understood: multi-touch ids (10), edge gestures for the
+  home indicator, and reads driven by the gpa1-0 interrupt instead of 8 ms polling
+  (plan.md W5). Tap latency measured with a scripted tap and the HID timestamp.
 
 ### T2 Fast loop and numbers (parallel)
 

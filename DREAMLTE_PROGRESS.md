@@ -887,18 +887,94 @@ touch does not. Hardware source: Samsung's `android_kernel_samsung_universal8895
   and the S Pen gap. S8 claims are labelled as inherited and verified on the
   S8 only.
 
+### Note 8 touch: the diagnostic boot (2026-10-23 06:42) and my dispatch bug
+
+Ring `logs/sweetlog-tsdiag.txt` (203 048 bytes, flush #36, pulled from TWRP
+after the user force-rebooted). Two findings, one of them mine.
+
+- **Touch never reached HID: the diagnostic build dropped every coordinate
+  event.** `aab3b9985` dispatched with `if ((ev[0] & 3) == 0)
+  s8ts_status_event(ev); else s8ts_report(ev);`, but `ev[0] & 3` is the event
+  id: **0 = coordinate, 1 = status** (`sec_ts.h`: `SEC_TS_COORDINATE_EVENT 0`,
+  `SEC_TS_STATUS_EVENT 1`). All 1203 finger events in the ring printed as
+  `S8 TOUCH: status event 84 .. stype 1` and were discarded; that `stype 1` is
+  the touch-id field, not a status type. Counted in the ring: `S8 TOUCH: down
+  id=` **0**, `SWEET HID: touch` **1** (the init release). The pre-diagnostic
+  worker passed every event to `s8ts_report()`, whose guard rejects only
+  ids != 0, so coordinate events were handled by accident - which is why
+  `greatlte-ts-overflow-2g-cmp-boot.img` still had working touch.
+- **The wedge is not the event FIFO: the IC cannot be addressed at all.** Last
+  good event line 3339 (`status event 84 fb 2d 65 ..` = a move at raw x 0xfb2
+  y 0x2d6), then immediately `event read failed (1) stage write-done byte 255
+  int 0x0`: the failure is in the **write/address phase** of `s8i2c_xfer()`,
+  not in the 0x60 read.
+  - `int 0x0`: INT_STATUS (0x24) has neither TRANS_DONE (bit 7) nor any
+    abort/no-ack/no-device/timeout bit (8-11). A slave NAK or a slave holding
+    the bus would set one; the controller reports nothing at all.
+  - Every later transaction fails the same way, including one-byte access to
+    other registers: `probe (32): ts status read failed (write-done byte 255
+    int 0x0)`, `id22 read failed`, and every recovery write -
+    `clear event stack failed`, `y661 soft reset 0x42 failed`, `boot status 0
+    (read failed)`, the y761 `0x12` also failed, `power mode read failed`,
+    `set func failed, sense refused`. An IC-side re-init can never work in this
+    state (5 attempts, ~13 s apart, all failed; 0 overflows).
+  - Trigger: mid-drag with the display **on**. `SWEET FB: display off` (3382)
+    and `on` (3417) come after; `presents at 200 s` (3442) and `245 s` (3511)
+    put the wedge near **190 s** of iOS uptime - earlier than the ~426 s of the
+    previous boot, so the heavy logging is a suspect in the *timing* only.
+  - Therefore the candidates are the controller/clock or the pads, not the IC's
+    event engine: if a USI09 clock got gated, PERIC1's domain turned off or
+    GPE3-0/1 (SCL/SDA) were re-muxed, the address phase never completes.
+    Nothing else in this port writes `0x108e0000`, `0x1082101c` or
+    `0x1098012x` (checked in `0124` and `apply-dreamlte.py`), so the next build
+    dumps those registers rather than guessing.
+- **Pre-existing bug found:** `s8ts_wait_boot_complete()` tested
+  `!s8ts_cmd_read(...)`, so it only examined the event when the read *failed*.
+  It never consumed the IC's boot-complete event (hence `S8 TOUCH: no
+  boot-complete event, trying anyway` at every boot, e.g. line 115 of the
+  previous ring), and my status-recovery change made that queued event a
+  reset-loop hazard.
+- **Reverted on the user's approval:** `greatlte-ts-overflow-2g-cmp-boot.img`
+  (`8b2a9dd5...adccded`, 16 842 768 bytes) pushed to `/tmp/revert.img`,
+  on-phone `sha256sum` matched, `dd ... of=/dev/block/sda7 bs=1048576
+  conv=fsync` rc=0, `sync`, read back `count=17` and `head -c 16842768` ->
+  the same `8b2a9dd5...adccded`. BOOT is the pre-diagnostic image again (touch
+  works, then wedges after minutes).
+- **Fix built, CI pending:** commit `3cdd1421e` (driver + regenerated `0124`;
+  every other section of the patch is byte-identical - verified):
+  1. dispatch on the real ids: `(ev[0] & 3) == S8TS_EVENT_STATUS (1)` ->
+     `s8ts_status_event()`, `== S8TS_EVENT_COORDINATE (0)` -> `s8ts_report()`;
+  2. `s8ts_wait_boot_complete()` tests the read result the right way, matches
+     `stype 2 && ev[1] == 0` and consumes the event, like
+     `sec_ts_wait_for_ready()`;
+  3. status handling matches `sec_ts.c:1033-1057`: watchdog (`INFO` + id 0 +
+     data_1 `0x20`) -> release fingers, `SENSE_ON`, re-init; queue-full ->
+     release fingers; ESD -> re-init. Every IC re-init goes through
+     `s8ts_try_recover()`: at most 4 per boot, >= 60 s apart, each skip logged;
+  4. the worker picks the recovery by failure stage - **write-stage** runs
+     `s8ts_bus_recover()` (re-assert the loader's USI09 PCLK/SCLK gates,
+     `USER_MUX`, USI v1 `0x3`, GPE3-0/1 function 2, then controller reset) and
+     `s8ts_dump_wedge()` (CTL/TRAILING/INT_EN/INT_STATUS/FIFO_STATUS,
+     CONF/AUTO_CONF/TRANS_STATUS/TIMEOUT/ADDR, PCLK/SCLK/USER_MUX/SYSREG,
+     TOP mux/div/gate, GPE3 CON/DAT/PUD, GPA1 DAT) on the first two and then
+     every 8th wedge; **read-stage** keeps the IC-side ladder.
+  - Lines to look for in the next ring: `S8 TOUCH: bus maps cmu 1 top 1
+    sysreg 1 gpe3 1`, `S8 TOUCH: boot complete event after N reads`, and on a
+    wedge `wedge (N): ctl .. gpe3 con ..` plus `bus recover (N): ..`.
+
 ## Open work
 
-1. Note 8 (greatlte) touch: **works in iOS, then wedges after ~7 min of use**
-   (user report; ring evidence in the section above). The diagnostic/recovery
-   kernel is built (CI 39960479295, image `greatlte-ts-diag-boot.img`
-   `5f8d971f...3b3fde7`) and **flashed to `sda7` on 2026-10-23 with matching
-   on-phone and read-back SHA-256**; the user was asked to run it for ~10 min
-   of use, note whether touch returns on its own (recovery) and how long that
-   takes, then reboot to TWRP for the ring pull. The new
-   `event read failed .. stage .. int ..` / `probe (N)` / `recovery attempt`
-   lines say whether the IC answers while events fail and which recovery step
-   it refuses. If recovery works, touch should come back without the reboot.
+1. Note 8 (greatlte) touch: **works in iOS, then wedges after a few minutes of
+   use** - and the wedge is now characterised (section above): the IC stops
+   answering in the **write/address** phase with INT_STATUS `0x0`, so the IC-side
+   recovery ladder cannot help. The diagnostic image was measured, its
+   coordinate-event dispatch bug was fixed, and BOOT is back on the pre-diagnostic
+   image `greatlte-ts-overflow-2g-cmp-boot.img` (`8b2a9dd5...adccded`, verified by
+   read-back). **Next: flash the build from `3cdd1421e`** (run 39989588696) and
+   read the ring for `wedge (N): .. gpe3 con ..` / `bus recover (N): ..` - the
+   controller, CMU and pin registers at the failure are what decide whether the
+   bus setup or the IC is at fault. Lines to look for are listed at the end of
+   the section above.
    The 2 GiB RAM question is closed: `greatlte-ts-overflow-2g-cmp-boot.img`
    (`8b2a9dd5...8adccded`, `vm_compression_limit=262144`) boots and shows 2 GiB
    on the phone; the 1 GiB fallback is
