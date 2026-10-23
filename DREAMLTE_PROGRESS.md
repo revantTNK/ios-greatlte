@@ -719,6 +719,22 @@ touch does not. Hardware source: Samsung's `android_kernel_samsung_universal8895
   SHA-256 `546cc223...82c307`, `lse-scan` 1 (same `<K256>`). Boot image
   `shim/dreamlte/out/greatlte-ts-worker-boot.img`, SHA-256
   `c451d807...15ff0d1b`, 16 842 768 bytes, same args as the LPM-fix image.
+- **Worker-fix boot (image `c451d807...15ff0d1b`, ring
+  `logs/sweetlog-worker.txt`, flush 19):** the enable fix worked exactly as
+  intended - `enable writes func ok, sense refused after 5 tries`,
+  `touch function now 61 00`, `power mode now 0`, `worker started`, and real
+  touches reached the HID layer (`SWEET HID: touch 0 down at 459,1185`,
+  `up at 675,1401`), including while iOS was still booting. After iOS came up
+  (`SweetHIDTouch open by IOHIDEventServiceUserClient`, backboardd), **all**
+  touch stopped: `event read failed (1)...(256)`, permanently. Root cause: the
+  pre-boot backlog had 63 events queued (`raw ... 3f`). The worker's guard
+  `left < 32` skipped the `READ_ALL_EVENT` read but still looped
+  `for (i = 0; i <= left; i++)` over `buf[8*32]`, parsing garbage past the
+  buffer (the `down id=7 x=0 y=0` flood, 145 lines), and the full stack then
+  wedged the IC's event port (every later `0x60` read failed). Fix follows
+  Samsung's `sec_ts_read_event`: `left > MAX_EVENT_COUNT-1` (31) means
+  overflow, so write `SEC_TS_CMD_CLEAR_EVENT_STACK` (`0x62`), wait 20 ms and
+  drop the batch; a run of failed reads also retries the `0x62` clear.
 - **Tool note:** `tools/dreamlte/pull-sweetlog.sh` skips `b/4096-1025`
   blocks, but USERDATA here is 55 254 167 552 bytes (not a multiple of
   4096), and TWRP's 32-bit shell arithmetic overflowed to `-142726`. The
@@ -731,13 +747,14 @@ touch does not. Hardware source: Samsung's `android_kernel_samsung_universal8895
 
 ## Open work
 
-1. Note 8 (greatlte) touch: **loader proven working** (40 coordinate events,
-   `sense` times out but the IC scans anyway). Kernel patch 0124 now has the
-   best-effort enable + unconditional worker start; CI run **39946348198**
-   (commit `be98f613`) is building it. When the kernel lands, build a boot
-   image with the same args as `greatlte-ts-appmode-boot.img` and flash it.
-   Look for `enable writes func ok, sense refused`, `touch function now 6100`,
-   `worker started`, `down id=0` and `raw 84 ..` in the ring.
+1. Note 8 (greatlte) touch: **loader proven working**, and the worker-fix boot
+   proved the HID path works too (`SWEET HID: touch 0 down at 459,1185`). It
+   only died on the 63-event pre-boot backlog wedging the event port. Patch
+   0124 now clears the event stack on overflow (`0x62`) and retries the clear
+   when reads fail; push it and wait for the xnu CI run, then build a boot
+   image with the same args and flash. Look for `event overflow (left 63),
+   clearing stack`, no `down id=7`, and `SWEET HID: touch` lines after
+   `SweetHIDTouch open`.
 2. Boot the latest kernel/loader: does the frame-done copy remove the tearing,
    and does the new Mongoose order start core 0x000?
 3. Mongoose: remaining cores, L2/non-CPU power, then raise the A53 clock.

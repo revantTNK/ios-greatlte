@@ -41,6 +41,8 @@
 #define S8TS_READ_BOOT_STATUS   0x55
 #define S8TS_READ_ONE_EVENT     0x60
 #define S8TS_READ_ALL_EVENT     0x61
+#define S8TS_CMD_CLEAR_EVENT_STACK 0x62
+#define S8TS_MAX_EVENTS         32      /* sec_ts.c MAX_EVENT_COUNT */
 #define S8TS_READ_TS_STATUS     0xaf
 #define S8TS_CMD_SET_POWER_MODE 0xe4  /* sec_ts: 0 = touch, 1 = low power */
 #define S8TS_POWER_MODE_TOUCH   0x00
@@ -288,6 +290,14 @@ s8ts_thread(void *arg, wait_result_t result)
 			if (++errors <= 8 || !(errors & 255)) {
 				printf("S8 TOUCH: event read failed (%u)\n", errors);
 			}
+			/* A full event stack seems to wedge the IC's event port:
+			 * boot 2026-10-23 14:5x showed 63 queued, then 256
+			 * consecutive read failures and no touch in iOS. Ask the IC
+			 * to drop the stack the way sec_ts_read_event() does. */
+			if (errors >= 4 && (errors & 3) == 0) {
+				uint8_t clr = S8TS_CMD_CLEAR_EVENT_STACK;
+				(void)s8ts_cmd_write(clr, NULL, 0);
+			}
 			s8ts_wait(20);
 			continue;
 		}
@@ -297,7 +307,20 @@ s8ts_thread(void *arg, wait_result_t result)
 			    buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]);
 		}
 		unsigned left = buf[7] & 0x3fu;
-		if (buf[0] && left && left < 32 &&
+		if (left > S8TS_MAX_EVENTS - 1) {
+			/* sec_ts_read_event(): the stock 32-event buffer calls a
+			 * left count above 31 an overflow - it clears the stack
+			 * (0x62) and drops the batch. Parsing past buf[] is what
+			 * produced the id=7 x=0 y=0 flood from the 63-event
+			 * backlog; the queue then stayed full and every following
+			 * read failed. */
+			uint8_t clr = S8TS_CMD_CLEAR_EVENT_STACK;
+			printf("S8 TOUCH: event overflow (left %u), clearing stack\n", left);
+			(void)s8ts_cmd_write(clr, NULL, 0);
+			s8ts_wait(20);
+			continue;
+		}
+		if (buf[0] && left &&
 		    !s8ts_cmd_read(S8TS_READ_ALL_EVENT, buf + 8, left * 8)) {   /* READ_ALL_EVENT */
 			left = 0;
 		}
