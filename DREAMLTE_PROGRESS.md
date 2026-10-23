@@ -619,13 +619,23 @@ touch does not. Hardware source: Samsung's `android_kernel_samsung_universal8895
   `apply-dreamlte.py`; `git apply --check` passes on that tree. CI run IDs and
   the phone result are to be filled in after the next test.
 - **Not tested on a phone.** No Note 8 was attached while this was written.
-  Images built locally with the *old* kernel (loader diagnostics only):
-  `shim/dreamlte/out/s8-tsdiag-boot.img` (SHA-256 `796ef058...6cd501`,
-  `s8tsprobe=20 s8tspause=30`, same boot args as the user's `s8-ios-boot.img`)
-  and `s8-tsdiag-reset-boot.img` (SHA-256 `b6300e02...c375df`, same plus
-  `s8tsreset=1 s8tspoll=1`). The loader ends with a one-line
-  `TS SUMMARY: boot=.. id52=.. id22=.. events=..` for a photo. Flashing BOOT
-  `sda7` needs the user's confirmation.
+  Loader diagnostics built with the *old* kernel: `shim/dreamlte/out/`
+  `s8-tsdiag-boot.img` (SHA-256 `796ef058...6cd501`, `s8tsprobe=20
+  s8tspause=30`, same boot args as the user's `s8-ios-boot.img`) and
+  `s8-tsdiag-reset-boot.img` (SHA-256 `b6300e02...c375df`, same plus
+  `s8tsreset=1`). The loader ends with a one-line
+  `TS SUMMARY: boot=.. id52=.. id22=.. events=..` for a photo.
+- **New kernel from CI.** xnu run `39936708949` (commit `8a1bc76`, dispatch
+  path `xnu/patches/**`) completed **success**; kernel
+  `kernel.development.a5xelte` SHA-256 `34f59681...a037ad0f`, 17 112 224
+  bytes, now in `xnu/out/`. `lse-scan.sh` reports the same single false
+  positive (`<K256>`) as the previous, booting kernel. Loader run
+  `39937567565` (commit `d6b4a1a`) completed **success**. Images with this
+  kernel, same user boot args plus `s8tspause=30 s8tsprobe=20 s8tsdebug=8`:
+  `s8-ts-boot.img` (SHA-256 `f366397e...51269b`, IRQ path) and
+  `s8-ts-poll-boot.img` (SHA-256 `709df96a...aa01b21`, adds `s8tspoll=1`).
+  Both untested on hardware; flashing BOOT `sda7` needs the user's
+  confirmation.
 - What the probe should answer, in order: (1) does `0x55`/`0x52` return at
   all (IC powered, bus and pins right); (2) app mode or boot mode after the
   resets; (3) does the boot-complete event appear; (4) are there coordinate
@@ -634,11 +644,11 @@ touch does not. Hardware source: Samsung's `android_kernel_samsung_universal8895
 
 ## Open work
 
-1. Note 8 (greatlte) touch: flash `shim/dreamlte/out/s8-tsdiag-boot.img` to
-   BOOT `sda7` (needs the user's confirmation), photograph the `TS SUMMARY:`
-   line during the 30 s hold; use `s8-tsdiag-reset-boot.img` if the IC does
-   not answer. The kernel from xnu run `39936708949` (y661-aware 0124) goes
-   into the next image once CI publishes it.
+1. Note 8 (greatlte) touch: with the user's confirmation, flash
+   `shim/dreamlte/out/s8-ts-boot.img` to BOOT `sda7` (new kernel, loader
+   probe holds the screen 50 s), photograph `TS SUMMARY:`; if events show
+   but iOS touch does not, try `s8-ts-poll-boot.img` (kernel ignores the IRQ
+   line). Raw kernel events with `s8tsdebug=8` land in the UFS log ring.
 2. Boot the latest kernel/loader: does the frame-done copy remove the tearing,
    and does the new Mongoose order start core 0x000?
 3. Mongoose: remaining cores, L2/non-CPU power, then raise the A53 clock.
