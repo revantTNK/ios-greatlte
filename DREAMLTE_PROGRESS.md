@@ -778,15 +778,11 @@ touch does not. Hardware source: Samsung's `android_kernel_samsung_universal8895
   the hole (`compressor` on 2026-10-20, `kmem_ptr_range_meta` in c13). The
   0124 mitigation cannot help: it only reserves 1 GiB of headroom when the
   hole is already larger than claims + 2 GiB.
-- **Fix flashed (2026-10-23), boot result pending:** cap the compressor pool
-  with the boot-arg
-  `vm_compression_limit` (a `TUNABLE`, parsed in `STARTUP_SUB_TUNABLES`,
-  before `STARTUP_SUB_KMEM`; the value is in pages of the kernel page size).
-  `vm_compression_limit=262144` is 4 GiB at 16 KiB pages (>1 GiB RAM uses
-  16 KiB pages) and 1 GiB at 4 KiB pages, and `compressor_pool_max_size`
-  (`= max_mem`) caps it either way - the pool becomes physical RAM, like the
-  iOS branch. At 2 GiB the static claims then drop to ~26 GiB, leaving ~18 GiB
-  for the kmem ptr/data/sprayqtn ranges. Image
+- **Fix: cap the compressor pool with the boot-arg `vm_compression_limit`**
+  (a `TUNABLE`, parsed in `STARTUP_SUB_TUNABLES`, before `STARTUP_SUB_KMEM`;
+  the value is in pages of the kernel page size). `vm_compression_limit=262144`
+  is 4 GiB at 16 KiB pages (>1 GiB RAM uses 16 KiB pages) and 1 GiB at 4 KiB
+  pages. Image
   `shim/dreamlte/out/greatlte-ts-overflow-2g-cmp-boot.img`, SHA-256
   `8b2a9dd5...8adccded`, ADT `dram-size 0x80000000` and payload
   `mem_size 0x80000000` verified, cmdline carries the new arg. It was written
@@ -795,6 +791,63 @@ touch does not. Hardware source: Samsung's `android_kernel_samsung_universal8895
   before it). Fallback
   `shim/dreamlte/out/greatlte-ts-overflow-1g-cmp-boot.img`, SHA-256
   `3fc9ed37...38593a8c`, 1024 MiB (stays on 4 KiB pages), same arg.
+- **2 GiB booted and verified (user-confirmed 2026-10-23; ring
+  `logs/sweetlog-2g-cmp.txt`, flush #54, 1 958 019 bytes):**
+  `vm_page_bootstrap: 127924 free pages` = 131072 x 16 KiB = **2 GiB** (page
+  size switched to 16 KiB as predicted), and the `S8 KMEM:` line is
+  `map 0xffffffe000000000-0xfffffffbffffffff largest free 0xb73dfc000 static
+  claims 0x7251e8000 (13)` - hole **45.79 GiB**, static claims **30.59 GiB**.
+  The 13 claims include `compressor (4096M)`, `zones (24G)`,
+  `kmem_ptr_range (4154M)`, `kmem_sprayqtn_range (1003M)`,
+  `kmem_data_range (11G)`. Correction to the prediction above: the compressor
+  claim is **4 GiB**, not 2 GiB. The `compressor_pool_max_size > max_mem ->
+  = max_mem` clamp exists only in the watch and `#else` branches of
+  `vm_compressor_set_size()`; the macOS branch keeps
+  `pool_max = C_SEG_MAX_LIMIT * c_seg_bufsize`, so the pool is
+  `ptoa_64(262144)` = 4 GiB (the effective minimum of the boot-arg and
+  `VM_COMPRESSOR_MAX_POOL_SIZE` 192 GiB) and the claim follows it. That is
+  still far below the 32 GiB the macOS 16x-RAM rule produced at 2 GiB, so the
+  boot succeeds; the extras (ptr 4154M + ptr_meta 784K + sprayqtn 1003M +
+  data 11G = 14.2 GiB) exactly fill the 45.79 - 30.59 = 15.2 GiB left after
+  the 1 GiB `kernel_map` mitigation. Claimed/kernel-marker numbers only:
+  iOS-visible "2 GiB of RAM" is the user report.
+- **Touch wedge on the same 2 GiB boot (user report + ring evidence).**
+  The user reports touch works for a few minutes of use and then stops dead
+  until a forced reboot. `logs/sweetlog-2g-cmp.txt` shows the same boot:
+  - 144 touch events, **0 overflow events**, then the last good one at
+    `SWEET HID: touch 0 down at 251,1318` / `up at 248,1317` (lines 3321-3323,
+    just after `SWEET FB: 600 presents at 426 s`).
+  - Immediately after it: `S8 TOUCH: event read failed (1)` .. `(8)`
+    (lines 3355-3362), then nothing about touch again until
+    `S8 TOUCH: event read failed (256)` (line 3533): 9 failure lines in total,
+    all in this one episode. The driver prints only a counter, so the reason
+    for each failure is not in the ring.
+  - Everything else stays healthy across the whole failure window: `SWEET FB`
+    presents to `1400 presents at 561 s`, `A5XELTE KEYS` GPIO keys, `SWEET AKS`,
+    SMP samples. `SWEET FB: display off` (line 3455) and `display on` (3484)
+    happen *after* the first failures, so a display power cycle did not start
+    this.
+  - The other I2C bus is alive at the same moment: `SWEET BATTERY: fuel gauge,
+    100% 4294mV` is line **3534**, the line right after `event read failed
+    (256)`. The MAX77865 sits on hsi2c_32/USI13, so the SoC's USI blocks and
+    bus plumbing are fine; the problem is on the touch bus/IC (hsi2c_23/USI09,
+    0x48) only.
+  - Driver mechanics: `s8ts_cmd_read(S8TS_READ_ONE_EVENT=0x60, buf, 8)` ->
+    `s8i2c_xfer()` -> `false` -> `s8i2c_reset(bus)` on every failure, and the
+    periodic `0x62` CLEAR_EVENT_STACK write (every 4th failure once `errors>=4`)
+    never clears the condition. `s8i2c_wait_done()` fails on INT_STATUS (0x24)
+    bits 8-11; the per-byte read wait on bit 24 of 0x30 is 20 ms.
+  - Estimated (not measured) cost per failed read: the print rule fires at
+    `errors == 8` and then only at multiples of 256, so (8) -> (256) is 248
+    failures; by the `SWEET FB: .. presents at .. s` markers that span roughly
+    uptime 430 s -> 535 s, i.e. ~0.4 s per failed read. That is timeout-shaped
+    (20 ms waits), not a fast NAK, but the ring cannot tell which wait timed
+    out - that is the gap a diagnostic build has to fill.
+  - A reboot restores touch (user report), so this is a runtime wedge of the
+    IC/bus, not damage. The failure is not reproducible from TWRP: it needs
+    ~7 min of iOS use, and TWRP cannot capture it (no `/dev/mem`, empty
+    `/sys/fs/pstore`, `/proc/last_kmsg` is TWRP's own log; the SWEETLOG ring
+    only holds successful boots).
 - **Tool note:** `tools/dreamlte/pull-sweetlog.sh` skips `b/4096-1025`
   blocks, but USERDATA here is 55 254 167 552 bytes (not a multiple of
   4096), and TWRP's 32-bit shell arithmetic overflowed to `-142726`. The
@@ -807,16 +860,21 @@ touch does not. Hardware source: Samsung's `android_kernel_samsung_universal8895
 
 ## Open work
 
-1. Note 8 (greatlte) touch: **works in iOS** (user report, overflow-fix boot).
-   Two follow-ups: (a) pull that boot's ring if touch "stops after a while" to
-   see whether reads fail again or the worker just wedges; (b) test the
-   compressor-capped 2 GiB image `greatlte-ts-overflow-2g-cmp-boot.img`
-   (`8b2a9dd5...8adccded`, `vm_compression_limit=262144`). If it panics
-   anyway, photograph the screen: the `S8 KMEM:` line and the panic line name
-   the claim and the numbers. Fall back to 1 GiB
-   `greatlte-ts-overflow-1g-cmp-boot.img` (`3fc9ed37...38593a8c`, same
-   boot-arg) or to the 512 MiB image `greatlte-ts-overflow-boot.img`
-   (`82db76be...a123e4fcec`).
+1. Note 8 (greatlte) touch: **works in iOS, then wedges after ~7 min of use**
+   (user report; ring evidence in the section above). Next step (proposed, not
+   started): one CI kernel that (a) prints the raw INT_STATUS (0x24) and the
+   failing phase on `event read failed`, (b) proves whether the IC still
+   answers a plain read (0xAF TS status / 0x22 device id) while events fail,
+   (c) attempts Samsung's recovery path when failures persist - soft reset
+   (y661 `0x42`), wait ~100 ms, `0x62` clear stack, `SET_FUNC 0x30 = 0x61 0x00`,
+   `SENSE_ON 0x10` - logging every step, and (d) parses the IC's status events
+   (boot-complete / watchdog, `stype == INFO`) instead of ignoring them, so a
+   self-reset by the IC triggers a re-init the way `sec_ts_reinit()` does.
+   The 2 GiB RAM question is closed: `greatlte-ts-overflow-2g-cmp-boot.img`
+   (`8b2a9dd5...8adccded`, `vm_compression_limit=262144`) boots and shows 2 GiB
+   on the phone; the 1 GiB fallback is
+   `greatlte-ts-overflow-1g-cmp-boot.img` (`3fc9ed37...38593a8c`) and the
+   512 MiB image is `greatlte-ts-overflow-boot.img` (`82db76be...a123e4fcec`).
 2. Boot the latest kernel/loader: does the frame-done copy remove the tearing,
    and does the new Mongoose order start core 0x000?
 3. Mongoose: remaining cores, L2/non-CPU power, then raise the A53 clock.
