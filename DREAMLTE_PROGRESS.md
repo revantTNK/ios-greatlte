@@ -847,7 +847,36 @@ touch does not. Hardware source: Samsung's `android_kernel_samsung_universal8895
     IC/bus, not damage. The failure is not reproducible from TWRP: it needs
     ~7 min of iOS use, and TWRP cannot capture it (no `/dev/mem`, empty
     `/sys/fs/pstore`, `/proc/last_kmsg` is TWRP's own log; the SWEETLOG ring
-    only holds successful boots).
+    only holds successful boots.
+- **Diagnostic + recovery kernel built (2026-10-23), flash pending:** CI run
+  **39960479295** (xnu, push, success), kernel SHA-256
+  `adf1c12428a450c7b564ea73bb96cc97753999e48d198986a6601714458c807e` (LSE scan
+  1 hit, `<K256>` only), from driver + `0124` commit `aab3b9985`. Image
+  `shim/dreamlte/out/greatlte-ts-diag-boot.img`, SHA-256
+  `5f8d971ff8da909ab50646ac907341e7856d23f616b3c225e65a892573b3fde7`,
+  16 842 768 bytes, `S8_DRAM_MIB=2048`, ADT `dram-size 0x80000000`, payload
+  `phys_base 0x880000000 mem_size 0x80000000`, cmdline identical to the 2 GiB
+  image (incl. `vm_compression_limit=262144`). What it adds:
+  - `S8 TOUCH: event read failed (N) stage <stage> byte <b> int 0x<int>` -
+    `stage` is `write-done` / `read-fifo` / `read-done` from
+    `s8i2c_xfer()`, `int` is the raw INT_STATUS (0x24) at the failure.
+  - `S8 TOUCH: probe (N): ts status <4 bytes>` / `id22 <5 bytes>` every 32
+    failures (0xaf and 0x22 over the same controller as the failing 0x60):
+    an answer means the event port, not the IC or the bus, is stuck.
+  - `S8 TOUCH: recovery attempt after N failures` every 64 failures: release
+    any held finger, `0x62` clear stack, y661 soft reset `0x42`, wait 150 ms,
+    read boot status `0x55`, y761 `0x12` if not app mode, controller reset,
+    wait for boot-complete, `0xE4` low-power exit, `SET_FUNC 0x30 = 0x61 0x00`,
+    `SENSE_ON 0x10`, read back the function. Every step logged, so the ring
+    says which step the IC refuses. If it takes, touch returns without a
+    reboot.
+  - Status events are no longer dropped: `S8 TOUCH: status event ..` and, on
+    an INFO/boot-complete event (`stype 2`, status id 0), a re-init - the IC's
+    own watchdog reset is one way it goes silent after Samsung's driver would
+    have called `sec_ts_reinit()`.
+  - Not yet tried on hardware: the soft reset path is untested on the y661;
+    a power cycle of the rails is not available to XNU (S2MPS17 LDO34/35 are
+    the loader's).
 - **Tool note:** `tools/dreamlte/pull-sweetlog.sh` skips `b/4096-1025`
   blocks, but USERDATA here is 55 254 167 552 bytes (not a multiple of
   4096), and TWRP's 32-bit shell arithmetic overflowed to `-142726`. The
@@ -861,15 +890,13 @@ touch does not. Hardware source: Samsung's `android_kernel_samsung_universal8895
 ## Open work
 
 1. Note 8 (greatlte) touch: **works in iOS, then wedges after ~7 min of use**
-   (user report; ring evidence in the section above). Next step (proposed, not
-   started): one CI kernel that (a) prints the raw INT_STATUS (0x24) and the
-   failing phase on `event read failed`, (b) proves whether the IC still
-   answers a plain read (0xAF TS status / 0x22 device id) while events fail,
-   (c) attempts Samsung's recovery path when failures persist - soft reset
-   (y661 `0x42`), wait ~100 ms, `0x62` clear stack, `SET_FUNC 0x30 = 0x61 0x00`,
-   `SENSE_ON 0x10` - logging every step, and (d) parses the IC's status events
-   (boot-complete / watchdog, `stype == INFO`) instead of ignoring them, so a
-   self-reset by the IC triggers a re-init the way `sec_ts_reinit()` does.
+   (user report; ring evidence in the section above). The diagnostic/recovery
+   kernel is built (CI 39960479295, image `greatlte-ts-diag-boot.img`
+   `5f8d971f...3b3fde7`) and waiting on the user to confirm the `sda7` flash.
+   Run it for ~10 min of use, then pull the ring: the new
+   `event read failed .. stage .. int ..` / `probe (N)` / `recovery attempt`
+   lines say whether the IC answers while events fail and which recovery step
+   it refuses. If recovery works, touch should come back without the reboot.
    The 2 GiB RAM question is closed: `greatlte-ts-overflow-2g-cmp-boot.img`
    (`8b2a9dd5...8adccded`, `vm_compression_limit=262144`) boots and shows 2 GiB
    on the phone; the 1 GiB fallback is
