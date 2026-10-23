@@ -778,7 +778,8 @@ touch does not. Hardware source: Samsung's `android_kernel_samsung_universal8895
   the hole (`compressor` on 2026-10-20, `kmem_ptr_range_meta` in c13). The
   0124 mitigation cannot help: it only reserves 1 GiB of headroom when the
   hole is already larger than claims + 2 GiB.
-- **Fix built, not tested:** cap the compressor pool with the boot-arg
+- **Fix flashed (2026-10-23), boot result pending:** cap the compressor pool
+  with the boot-arg
   `vm_compression_limit` (a `TUNABLE`, parsed in `STARTUP_SUB_TUNABLES`,
   before `STARTUP_SUB_KMEM`; the value is in pages of the kernel page size).
   `vm_compression_limit=262144` is 4 GiB at 16 KiB pages (>1 GiB RAM uses
@@ -788,7 +789,10 @@ touch does not. Hardware source: Samsung's `android_kernel_samsung_universal8895
   for the kmem ptr/data/sprayqtn ranges. Image
   `shim/dreamlte/out/greatlte-ts-overflow-2g-cmp-boot.img`, SHA-256
   `8b2a9dd5...8adccded`, ADT `dram-size 0x80000000` and payload
-  `mem_size 0x80000000` verified, cmdline carries the new arg. Fallback
+  `mem_size 0x80000000` verified, cmdline carries the new arg. It was written
+  to `sda7` with matching on-phone SHA and read-back on 2026-10-23 and is the
+  image BOOT holds now (512 MiB `greatlte-ts-overflow-boot.img` was in BOOT
+  before it). Fallback
   `shim/dreamlte/out/greatlte-ts-overflow-1g-cmp-boot.img`, SHA-256
   `3fc9ed37...38593a8c`, 1024 MiB (stays on 4 KiB pages), same arg.
 - **Tool note:** `tools/dreamlte/pull-sweetlog.sh` skips `b/4096-1025`
