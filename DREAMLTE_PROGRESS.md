@@ -645,37 +645,59 @@ touch does not. Hardware source: Samsung's `android_kernel_samsung_universal8895
   `658ba54f...63296d`, whole 40 MiB). Phone rebooted from TWRP.
 - **First phone evidence (loader screen, 2026-10-23):**
   `TS SUMMARY: boot=0x20 id52=0xacb661 id22=0x5345b66100 events=0x0`.
-  Observations, not guesses: the controller **answers on I2C**, is in
-  **application mode** (`0x20`), and is **not an S6SY761** — `id52` is
-  `0xacb661`, whereas the S8's S6SY761 reads `0xac3761`. The five-byte
-  `READ_DEVICE_ID 0x22` returns `53 45 b6 61 00`. The user touched the panel
-  throughout the 20 s poll, and `events=0`, so this is a real "no events", not
-  an idle panel. The same boot loaded iOS with the new kernel (boot worked)
-  and still had no touch.
-- **Next hypothesis (not yet observed on the phone): low-power mode.** Samsung
-  enters LPM with `SET_POWER_MODE 0xE4 = 1` (`sec_ts_pm_suspend`) and leaves it
-  with `sec_ts_set_lowpowermode(TO_TOUCH_MODE)`: write `0xE4 = 0`, wait 50 ms,
-  read it back. `SENSE_ON 0x10` alone does **not** resume scanning. S-Boot can
-  leave the IC in that state, which would explain app mode + readable IDs +
-  no events. New probe reads `0xE4` before/after the write (`pwr`, `setpwr`,
-  `pwr2`, `pwr3`), re-reads TS status (`ts st2`), reads the touch function back
-  (`func2`), and the summary now ends `... pwr=.. events=..`; the kernel
-  driver calls `s8ts_exit_low_power()` after the boot-complete wait and logs
-  the function/status read-backs. Loader SHA-256 after this change is built
-  into the next image; kernel patch 0124 was regenerated again.
-- What the probe should answer, in order: (1) does `0x55`/`0x52` return at
-  all (IC powered, bus and pins right); (2) app mode or boot mode after the
-  resets; (3) does the boot-complete event appear; (4) are there coordinate
-  events while a finger is on the panel, and does gpa1-0 follow them. A `0x52`
-  value that is not `ac3761` would confirm the y661.
+  Observations, not guesses: the controller **answers on I2C**, and is **not
+  an S6SY761** — `id52` is `0xacb661`, whereas the S8's S6SY761 reads
+  `0xac3761`. The five-byte `READ_DEVICE_ID 0x22` returns `53 45 b6 61 00`.
+  The user touched the panel throughout the 20 s poll, and `events=0`, so
+  this is a real "no events", not an idle panel. The same boot loaded iOS
+  with the (then current) kernel and still had no touch. The user also
+  confirmed that **touch works in TWRP on this phone**, so panel, IC, rails
+  and the y661 protocol are all fine; the fault is in our init sequence.
+- **Re-reading the photo (2026-10-23, correction):** the screen also showed
+  `swrst42/swrst12` lines, and those are printed **only** when the first
+  `0x55` read is not application mode; `panel`, `fw ok`, `ts st` and `func`
+  all read **0**, `bootev=0`, `setfn=0`, `sense=0`, `irq=1`, `reads=0x239`,
+  `events=0`. The `TS SUMMARY boot=0x20` is the value re-read *after* the
+  soft reset, not the first one. So at loader time the IC was still in its
+  **bootloader (`0x10`)**: it answers the id commands, but the application
+  registers read zero. The old probe then reset it (0x42 and, wrongly, the
+  y761's 0x12), wrote function/sense too early and polled an IC that had
+  just been rebooted. (The flashed loader has no `0xE4` code; a `pwr` line
+  read from the photo earlier was a misread — `strings` on the image shows
+  no `pwr`/`setpwr` label.)
+- **Fix prepared (not yet flashed):** the probe now waits up to 2 s for
+  `0x55 = 0x20` before reading anything else, resets only if still in boot
+  mode and with the **chip-specific** command (y661 `0x42`, y761 `0x12`),
+  waits for the boot-complete event for 2 s (Samsung's 100 x 20 ms), then
+  reads panel/fw/ts status/function/power mode, exits LPM
+  (`0xE4 = 0` + 50 ms read-back), writes `0x61`/`SENSE_ON`, reads them back
+  and polls. The kernel driver in CI run `39941292457` (commit `fed6c3d`)
+  has the same `s8ts_exit_low_power()`; kernel SHA-256
+  `44508ec9...7562e3`, `lse-scan` 1 (the pre-existing `<K256>`).
+- **Next image:** `shim/dreamlte/out/greatlte-ts-appmode-boot.img`, SHA-256
+  `a97c7007...f4458a1`, kernel `44508ec9...`, loader 66 848 bytes, args
+  `s8tsreset=1 s8tspause=40 s8tsprobe=20 s8tsdebug=8 s8tspoll=1`.
+  `s8tsreset=1` power-cycles LDO34/35, so the IC gets a clean POR before
+  the 2 s application-mode wait.
+- What the next probe answers, in order: (1) does the IC reach `0x55 = 0x20`
+  within 2 s of a clean POR (`appmode`); (2) is firmware integrity `0x80`
+  in application mode (`fw ok`); (3) does the boot-complete event appear;
+  (4) are there coordinate events while a finger is on the panel, and does
+  gpa1-0 follow them. If `fw ok` stays `0x00` in application mode, the IC
+  firmware is invalid and must be downloaded (`SEC_TS_FW_UPDATE_ON_PROBE`,
+  `tsp_sec/y661_great.fw`), which the loader cannot do yet.
 
 ## Open work
 
 1. Note 8 (greatlte) touch: with the user's confirmation, flash
-   `shim/dreamlte/out/s8-ts-boot.img` to BOOT `sda7` (new kernel, loader
-   probe holds the screen 50 s), photograph `TS SUMMARY:`; if events show
-   but iOS touch does not, try `s8-ts-poll-boot.img` (kernel ignores the IRQ
-   line). Raw kernel events with `s8tsdebug=8` land in the UFS log ring.
+   `shim/dreamlte/out/greatlte-ts-appmode-boot.img` (SHA-256
+   `a97c7007...f4458a1`) to BOOT `sda7`. It power-cycles the touch rails,
+   waits for application mode, prints `appmode`/`fw ok`/`ts st`/`pwr`, then
+   holds the screen 40 s: photograph `TS SUMMARY:` while touching during the
+   20 s poll. If `fw ok` stays 0x00 in application mode, the IC needs its
+   firmware downloaded (`tsp_sec/y661_great.fw`); that is the next project.
+   Raw kernel events with `s8tsdebug=8` land in the UFS log ring (TWRP +
+   `tools/dreamlte/pull-sweetlog.sh`).
 2. Boot the latest kernel/loader: does the frame-done copy remove the tearing,
    and does the new Mongoose order start core 0x000?
 3. Mongoose: remaining cores, L2/non-CPU power, then raise the A53 clock.

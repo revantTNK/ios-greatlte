@@ -315,6 +315,68 @@ void touch_probe(void (*kv_fn)(const char *, uint64_t), void (*out_fn)(const cha
 		for (unsigned i = 0; i < 5; i++)
 			id22 = id22 << 8 | b[i];
 	}
+	out("\n");
+
+	/* S-Boot can hand off while the IC is still in its bootloader (0x10):
+	 * it answers the id commands but the application registers read zero.
+	 * Give it up to 2 s to reach application mode (0x20) before reading
+	 * anything else, like sec_ts_wait_for_ready does on Android. */
+	unsigned appmode = 0;
+	for (unsigned i = 0; i < 40; i++) {
+		if (!bst && v == 0x20) {
+			appmode = i + 1;
+			break;
+		}
+		delay_ms(50);
+		c = 0x55;
+		bst = reg1(c, b, 1, &v);
+	}
+	if (appmode) {
+		dump("boot st", b, 1, bst);
+		out("\n");
+	}
+	kv("appmode", appmode);
+	out("\n");
+
+	/* A chip still in boot mode after that gets a soft reset (Samsung's
+	 * sec_ts_reinit): y661 uses 0x42, y761 uses 0x12. Sending 0x12 to a
+	 * y661 means nothing good. */
+	if (v != 0x20) {
+		uint8_t rst = (id52 == 0xac3761) ? 0x12 : 0x42;
+		kv("swrst", xfer(&rst, 1, 0, 0));
+		delay_ms(50);
+		for (unsigned i = 0; i < 40; i++) {
+			c = 0x55;
+			bst = reg1(c, b, 1, &v);
+			if (!bst && v == 0x20)
+				break;
+			delay_ms(50);
+		}
+		c = 0x55;
+		bst = reg1(c, b, 1, &v);
+		dump("boot st2", b, 1, bst);
+		out("\n");
+	}
+
+	/* Drain the queue until the IC reports its boot-complete INFO event
+	 * (y661/y761 sec_ts_start_device does the same: 100 x 20 ms). */
+	unsigned bootev = 0;
+	for (unsigned i = 0; i < 100; i++) {
+		c = 0x60;
+		st = xfer(&c, 1, b, 8);
+		if (!st && b[0]) {
+			dump("ev", b, 8, st);
+			if (((b[0] >> 2) & 0xf) == 2 && b[1] == 0) {
+				bootev = i + 1;
+				break;
+			}
+		}
+		delay_ms(20);
+	}
+	kv("bootev", bootev);
+	out("\n");
+
+	/* Application state, now that the firmware should be running. */
 	c = 0x23;	/* PANEL_INFO: max_x/max_y be16, nodes at [8], [9] */
 	st = xfer(&c, 1, b, 11);
 	dump("panel", b, 8, st);
@@ -331,41 +393,6 @@ void touch_probe(void (*kv_fn)(const char *, uint64_t), void (*out_fn)(const cha
 	st = xfer(&c, 1, b, 1);
 	dump("pwr", b, 1, st);
 	kv("irq", rd(GPA1 + 4) & 1);
-	out("\n");
-
-	if (bst || v != 0x20) {
-		/* y661 resets with 0x42, y761 with 0x12. Try both, then look
-		 * again; an IC that is already in app mode ignores them. */
-		c = 0x42;
-		st = xfer(&c, 1, 0, 0);
-		kv("swrst42", st);
-		delay_ms(50);
-		c = 0x12;
-		st = xfer(&c, 1, 0, 0);
-		kv("swrst12", st);
-		delay_ms(120);
-		c = 0x55;
-		bst = reg1(c, b, 1, &v);
-		dump("boot st2", b, 1, bst);
-		out("\n");
-	}
-
-	/* Drain the queue until the IC reports its boot-complete INFO event
-	 * (y661/y761 sec_ts_start_device does the same before enabling). */
-	unsigned bootev = 0;
-	for (unsigned i = 0; i < 25; i++) {
-		c = 0x60;
-		st = xfer(&c, 1, b, 8);
-		if (!st && b[0]) {
-			dump("ev", b, 8, st);
-			if (((b[0] >> 2) & 0xf) == 2 && b[1] == 0) {
-				bootev = i + 1;
-				break;
-			}
-		}
-		delay_ms(20);
-	}
-	kv("bootev", bootev);
 	out("\n");
 
 	/* S-Boot can leave the IC in low-power mode (0xE4 = 1; Samsung's
