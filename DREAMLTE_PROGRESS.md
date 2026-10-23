@@ -788,7 +788,9 @@ touch does not. Hardware source: Samsung's `android_kernel_samsung_universal8895
   for the kmem ptr/data/sprayqtn ranges. Image
   `shim/dreamlte/out/greatlte-ts-overflow-2g-cmp-boot.img`, SHA-256
   `8b2a9dd5...8adccded`, ADT `dram-size 0x80000000` and payload
-  `mem_size 0x80000000` verified, cmdline carries the new arg.
+  `mem_size 0x80000000` verified, cmdline carries the new arg. Fallback
+  `shim/dreamlte/out/greatlte-ts-overflow-1g-cmp-boot.img`, SHA-256
+  `3fc9ed37...38593a8c`, 1024 MiB (stays on 4 KiB pages), same arg.
 - **Tool note:** `tools/dreamlte/pull-sweetlog.sh` skips `b/4096-1025`
   blocks, but USERDATA here is 55 254 167 552 bytes (not a multiple of
   4096), and TWRP's 32-bit shell arithmetic overflowed to `-142726`. The
@@ -807,7 +809,8 @@ touch does not. Hardware source: Samsung's `android_kernel_samsung_universal8895
    compressor-capped 2 GiB image `greatlte-ts-overflow-2g-cmp-boot.img`
    (`8b2a9dd5...8adccded`, `vm_compression_limit=262144`). If it panics
    anyway, photograph the screen: the `S8 KMEM:` line and the panic line name
-   the claim and the numbers. Fall back to 1 GiB (`S8_DRAM_MIB=1024`, same
+   the claim and the numbers. Fall back to 1 GiB
+   `greatlte-ts-overflow-1g-cmp-boot.img` (`3fc9ed37...38593a8c`, same
    boot-arg) or to the 512 MiB image `greatlte-ts-overflow-boot.img`
    (`82db76be...a123e4fcec`).
 2. Boot the latest kernel/loader: does the frame-done copy remove the tearing,
