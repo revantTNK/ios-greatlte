@@ -57,26 +57,32 @@ Inherited from the S8 port and verified on an S8, not yet re-verified on the Not
 
 ## Known bugs
 
-- **No touch on the Note 8.** The y661 is in low-power mode (`0xE4 = 1`); `SENSE_ON` alone does not resume it. The loader/kernel now exit LPM (`0xE4 = 0`), wait for application mode and use the chip-specific reset command, but the result of the flashed image has not been checked. Touch works in TWRP, so panel, IC, rails and the protocol are fine; the fault is in the init sequence.
+- **Touch works on the Note 8, then wedges after a few minutes of use.** Taps land, but after ~7 min of use the IC's event port stops answering (`event read failed (1)…(256)`) while the rest of the system stays healthy; a forced reboot restores it. The init sequence is solved (LPM exit, chip-specific reset, `0x61`/`SENSE_ON`); the wedge is diagnosed in [docs/roadmap.md](docs/roadmap.md) phase T1, with the recovery retry and the diagnostics flashed to the phone.
 - **Battery capacity is wrong for this phone.** The kernel hard-codes `SWEET_BAT_MAH 3000` (the S8's battery); the Note 8 has 3300 mAh, so percentages and capacities are off.
 - **The S Pen is not supported** (Wacom W9018 is not wired into HID).
-- **Very slow and laggy.** All rendering is on the CPU, there is no GPU. About 15 minutes to the lock screen on an S8 with one core.
+- **Very slow and laggy.** All rendering is on the CPU, there is no GPU. The Note 8 images still run `cpus=4` at the default A53 clock; the S8 daily image already runs 8 cores with A53 1690 / Mongoose 1703 MHz, and the Note 8 has not been tried at those settings yet.
 - Frames tear because DECON scans the panel memory while AppleCLCD copies into it. Patched in the latest S8 commit, not verified on the Note 8.
 - The centered iPhone X 1125×2436 presentation is faster; the full-screen 1440×2960 mode (`sweetfb_native=1`) is the default.
-- The Mongoose (big) cluster does not start yet. Only 4 A53 cores run.
+- The Mongoose (big) cluster starts on the S8 (8/8 cores), but XNU still has one scheduler cluster, so the UI can be scheduled on an A53.
 - No Wi-Fi, Bluetooth, cellular, audio, cameras, sensors, GPS or SEP / Face ID.
-- **No GPU.** The Mali-G71 cannot run iOS's Metal / AGX drivers, so hardware graphics is not realistic.
+- **No GPU.** The Mali-G71 cannot run Apple's Metal / AGX stack, so CoreAnimation renders in software; a Mali path through CoreAnimation's OpenGL ES backend is the research direction ([docs/gpu-research.md](docs/gpu-research.md)).
 - Security is off: permissive AMFI/sandbox, stub AppleKeyStore. Do not put anything personal on it.
 
 ## Roadmap
 
-- [ ] y661 touch: confirm the LPM exit and the `0x61`/`SENSE_ON` writes in the loader, then get coordinate events in XNU
-- [ ] Verify the iOS lock screen, home screen and touch on the Note 8
+Sequenced timeline with rough dates: **[docs/roadmap.md](docs/roadmap.md)** (touch reliability → display scaling → cores → Mali → Metal).
+
+- [x] y661 touch: LPM exit, application mode and the `0x61`/`SENSE_ON` writes; coordinate events in XNU
+- [x] Verify the iOS lock screen, home screen and touch on the Note 8
+- [ ] y661 touch that survives real use (phase T1)
 - [ ] Report the Note 8's 3300 mAh design capacity
 - [ ] S Pen input (Wacom W9018)
 - [ ] Tear-free display on the Note 8 (inherited frame-done copy)
-- [ ] Bring up the Mongoose cluster, raise the A53 clock
-- [ ] More RAM (512 MiB of 6 GiB today)
+- [ ] Note 8: 8 cores and raised clocks (the S8 daily image has them; this phone has not been tried)
+- [ ] Bring up the Mongoose cluster properly: L2/non-CPU power, two scheduler clusters
+- [ ] More RAM for the S8 (512 MiB today; the Note 8 runs 2 GiB)
+- [ ] Fewer pixels per frame: hardware scaling (DPP), zero-copy scan-out
+- [ ] GPU: "the Mali does one job", then CoreAnimation over Mesa Panfrost ([docs/gpu-research.md](docs/gpu-research.md))
 - [ ] Wi-Fi (BCM4361): a large job
 
 Help is welcome: issues and pull requests.

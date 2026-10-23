@@ -910,3 +910,6 @@ touch does not. Hardware source: Samsung's `android_kernel_samsung_universal8895
 4. Zero-copy scanout through the DPU IDMA (needs the SFR update to take effect).
 5. Vibration, backlight, Wi-Fi (BCM4361).
 6. Housekeeping: `NOTES.md` and `A5XELTE_PROGRESS.md` moved to `docs/history/` as donor history.
+7. Plan and timeline: `docs/roadmap.md` sequences the remaining features (touch
+   reliability -> display scaling -> cores -> Mali -> Metal) with rough dates and
+   exit criteria; consult it for priorities and update it when a phase closes.

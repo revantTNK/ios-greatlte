@@ -1,6 +1,6 @@
 # galaxios8 product plan
 
-Goal: a Galaxy S8 (Exynos, SM-G950F / SM-G950N) that runs iOS 16 well enough to be used as a phone-shaped iOS device every day, installed and updated from a Mac by one command. This plan says what "good enough" means, where the project is, the work streams that close the gap, what to do when an approach fails, and the order to do things in. Facts and interfaces are in [spec.md](spec.md); day-to-day evidence goes to [`DREAMLTE_PROGRESS.md`](../DREAMLTE_PROGRESS.md).
+Goal: a Galaxy S8 (Exynos, SM-G950F / SM-G950N) that runs iOS 16 well enough to be used as a phone-shaped iOS device every day, installed and updated from a Mac by one command. This plan says what "good enough" means, where the project is, the work streams that close the gap, what to do when an approach fails, and the order to do things in. Facts and interfaces are in [spec.md](spec.md); the sequence and rough dates are in [roadmap.md](roadmap.md); day-to-day evidence goes to [`DREAMLTE_PROGRESS.md`](../DREAMLTE_PROGRESS.md).
 
 ## 1. Definition of done
 
