@@ -700,6 +700,10 @@ touch does not. Hardware source: Samsung's `android_kernel_samsung_universal8895
   4096), and TWRP's 32-bit shell arithmetic overflowed to `-142726`. The
   correct skip is `(b - 1025*4096)/4096` = **13488762**; with the naive read
   the `SWEETLOG` header lands at offset 4096 of the pulled area.
+- **README (2026-10-23):** rewritten for this fork as `ios-greatlte`: the
+  Note 8 hardware, the y661 touch state, the 3000 mAh hard-coded capacity
+  and the S Pen gap. S8 claims are labelled as inherited and verified on the
+  S8 only.
 
 ## Open work
 
