@@ -636,6 +636,14 @@ touch does not. Hardware source: Samsung's `android_kernel_samsung_universal8895
   `s8-ts-poll-boot.img` (SHA-256 `709df96a...aa01b21`, adds `s8tspoll=1`).
   Both untested on hardware; flashing BOOT `sda7` needs the user's
   confirmation.
+- **First Note 8 flash (2026-10-23).** The user approved writing BOOT, and with
+  the phone in TWRP (`ro.product.device=greatlte`, `ro.product.model=Galaxy
+  Note8`, `sda7` = 41 943 040 bytes) `s8-ts-boot.img` was pushed, its on-phone
+  SHA-256 checked, `dd`-written to `/dev/block/sda7` with `conv=fsync` and read
+  back: **`f366397e...51269b`, identical**. The previous BOOT was saved first
+  to the git-ignored `backup/BOOT-greatlte-before-touch.img` (SHA-256
+  `658ba54f...63296d`, whole 40 MiB). Phone rebooted from TWRP; the loader
+  probe result is pending (photo of `TS SUMMARY:`).
 - What the probe should answer, in order: (1) does `0x55`/`0x52` return at
   all (IC powered, bus and pins right); (2) app mode or boot mode after the
   resets; (3) does the boot-complete event appear; (4) are there coordinate
