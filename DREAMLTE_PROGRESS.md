@@ -728,11 +728,12 @@ touch does not. Hardware source: Samsung's `android_kernel_samsung_universal8895
 ## Open work
 
 1. Note 8 (greatlte) touch: **loader proven working** (40 coordinate events,
-   `sense` NAK tolerated by the kernel now). Patch 0124 has the best-effort
-   enable + unconditional worker start; when the CI kernel lands, build a
-   boot image (loader already at `greatlte-ts-appmode-boot.img` settings) and
-   flash it. Look for `enable writes func ok, sense refused`, then
-   `touch function now 6100`, `worker started` and `down id=0` in the ring.
+   `sense` times out but the IC scans anyway). Kernel patch 0124 now has the
+   best-effort enable + unconditional worker start; CI run **39946348198**
+   (commit `be98f613`) is building it. When the kernel lands, build a boot
+   image with the same args as `greatlte-ts-appmode-boot.img` and flash it.
+   Look for `enable writes func ok, sense refused`, `touch function now 6100`,
+   `worker started`, `down id=0` and `raw 84 ..` in the ring.
 2. Boot the latest kernel/loader: does the frame-done copy remove the tearing,
    and does the new Mongoose order start core 0x000?
 3. Mongoose: remaining cores, L2/non-CPU power, then raise the A53 clock.
