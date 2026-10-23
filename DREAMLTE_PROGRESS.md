@@ -739,6 +739,25 @@ touch does not. Hardware source: Samsung's `android_kernel_samsung_universal8895
   SHA-256 `5758423f...9ecbb27`, `lse-scan` 1. Boot image
   `shim/dreamlte/out/greatlte-ts-overflow-boot.img`, SHA-256
   `82db76be...a123e4fcec`, 16 842 768 bytes, same args as the worker image.
+- **Touch works in iOS on the Note 8 (user report, 2026-10-23).** After the
+  overflow-fix boot (`82db76be...a123e4fcec`), dragging on the screen worked
+  in iOS. The user adds that touch may stop after a while while everything
+  else stays responsive; that boot's ring has not been pulled yet, so treat
+  "works" as reported and "stops later" as unverified.
+- **RAM is a config choice, not a hardware limit.** The Note 8 bank is
+  `0x880000000-0x8ffffffff` = **2048 MiB**; `S8_DRAM_MIB` (default 512,
+  `tools/dreamlte/make-boot.sh`) sets both the ADT `dram-size` and the payload
+  `mem_size`. 512 MiB was chosen only to get past the 2026-10-20 panic at
+  2 GiB: `kmem_range_init: vm_map_locate_space failing for claim
+  kmem_ptr_range_meta`. Cause (0124 comment): `kmem_add_extra_claims()` sizes
+  ptr/sprayqtn/data to fill the largest free `kernel_map` hole exactly, then
+  places them from a fuzzed start, so any VA lost to placement makes the last
+  claim miss. Patch 0124 has an **untested** mitigation (keep 1 GiB of the
+  hole out of the sizing when the hole is bigger than claims + 2 GiB) plus
+  `S8 KMEM:` diagnostics. 2 GiB image built with the proven kernel:
+  `shim/dreamlte/out/greatlte-ts-overflow-2g-boot.img`, SHA-256
+  `83379bb4...6d61472a3a`, ADT `dram-size 0x80000000` and payload
+  `mem_size 0x80000000` verified, same args and `s8ts` settings.
 - **Tool note:** `tools/dreamlte/pull-sweetlog.sh` skips `b/4096-1025`
   blocks, but USERDATA here is 55 254 167 552 bytes (not a multiple of
   4096), and TWRP's 32-bit shell arithmetic overflowed to `-142726`. The
@@ -751,17 +770,15 @@ touch does not. Hardware source: Samsung's `android_kernel_samsung_universal8895
 
 ## Open work
 
-1. Note 8 (greatlte) touch: **loader proven working**, and the worker-fix boot
-   proved the HID path works too (`SWEET HID: touch 0 down at 459,1185`). It
-   only died on the 63-event pre-boot backlog wedging the event port. Patch
-   0124 now clears the event stack on overflow (`0x62`) and retries the clear
-   when reads fail; push it and wait for the xnu CI run, then build a boot
-   image with the same args and flash. Look for `event overflow (left 63),
-   clearing stack`, no `down id=7`, and `SWEET HID: touch` lines after
-   `SweetHIDTouch open`.
+1. Note 8 (greatlte) touch: **works in iOS** (user report, overflow-fix boot).
+   Two follow-ups: (a) pull that boot's ring if touch "stops after a while" to
+   see whether reads fail again or the worker just wedges; (b) test the 2 GiB
+   image `greatlte-ts-overflow-2g-boot.img` (`83379bb4...472a3a`) - if it
+   panics in `kmem_range_init` again, the 0124 mitigation is wrong and the
+   `S8 KMEM:` line says by how much; fall back to 1 GiB (`S8_DRAM_MIB=1024`).
 2. Boot the latest kernel/loader: does the frame-done copy remove the tearing,
    and does the new Mongoose order start core 0x000?
 3. Mongoose: remaining cores, L2/non-CPU power, then raise the A53 clock.
 4. Zero-copy scanout through the DPU IDMA (needs the SFR update to take effect).
-5. More RAM (512 MiB of 4 GiB), vibration, backlight, Wi-Fi (BCM4361).
+5. Vibration, backlight, Wi-Fi (BCM4361).
 6. Housekeeping: `NOTES.md` and `A5XELTE_PROGRESS.md` moved to `docs/history/` as donor history.
