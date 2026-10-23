@@ -80,6 +80,9 @@ def build(canvas=(FB_W, FB_H), dram_size=DRAM_SIZE):
     set_prop(root, 'compatible', mkadt.cstr('samsung,dreamlte') +
              mkadt.cstr('samsung,a5xelte') + mkadt.cstr('samsung,exynos8895') +
              mkadt.cstr('AppleARM'))
+    set_prop(root, 'region-info', mkadt.cstr('VN/A'))
+    set_prop(root, 'model-number', mkadt.cstr('MQAC2VN'))
+    set_prop(root, 'serial-number', mkadt.cstr('EXYNOS8895'))
     chosen = child(root, 'chosen')
     set_prop(chosen, 'dram-base', mkadt.u64(DRAM_BASE))
     set_prop(chosen, 'dram-size', mkadt.u64(dram_size))
