@@ -81,7 +81,7 @@ index 3ba2fd4..dcbd143 100644
  		return;
  	}
 diff --git bsd/dev/a5xelte_touch.c bsd/dev/a5xelte_touch.c
-index 7ba309b..a0421c8 100644
+index 7ba309b..44a5ca1 100644
 --- a/bsd/dev/a5xelte_touch.c
 +++ b/bsd/dev/a5xelte_touch.c
 @@ -12,6 +12,7 @@
@@ -92,7 +92,7 @@ index 7ba309b..a0421c8 100644
  
  extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
  extern void thread_terminate_self(void);
-@@ -615,10 +616,572 @@ a5touch_start_early(vm_offset_t nfc, vm_offset_t alive)
+@@ -615,10 +616,702 @@ a5touch_start_early(vm_offset_t nfc, vm_offset_t alive)
  	}
  }
  
@@ -146,6 +146,7 @@ index 7ba309b..a0421c8 100644
 +#define S8TS_POWER_MODE_TOUCH   0x00
 +#define S8TS_STATUS_APP_MODE    0x20
 +#define S8TS_FUNC_TOUCH_PALM_WET 0x61u  /* sec_ts default: TOUCH|PALM|WET */
++#define S8TS_EVENT_STATUS_INFO  2       /* sec_ts TYPE_STATUS_EVENT_INFO */
 +
 +static vm_offset_t s8ts_i2c, s8ts_alive, s8bat_i2c;
 +static int s8ts_sleep;
@@ -155,6 +156,13 @@ index 7ba309b..a0421c8 100644
 +static int s8ts_raw;            /* s8tsdebug=N: log the first N raw events */
 +static bool s8ts_down[S8TS_FINGERS];
 +static uint16_t s8ts_x[S8TS_FINGERS], s8ts_y[S8TS_FINGERS];
++
++/* Where the last s8i2c_xfer() gave up, and what INT_STATUS said then. The
++ * worker prints these on a failed event read: the ring alone cannot tell a
++ * slave NAK (bits 8-11 early) from the RX-FIFO/TRANS_DONE timeouts. */
++static const char *s8i2c_diag_stage = "-";
++static uint32_t s8i2c_diag_int;
++static unsigned s8i2c_diag_byte;
 +
 +/* i2c-exynos5.c: reset, Exynos8895 fast-mode timing, master auto mode. */
 +static void
@@ -211,6 +219,8 @@ index 7ba309b..a0421c8 100644
 +			a5touch_write(bus, 0x34, w[i]);
 +		}
 +		if (!s8i2c_wait_done(bus)) {
++			s8i2c_diag_stage = "write-done";
++			s8i2c_diag_byte = 0xffu;
 +			goto fail;
 +		}
 +	}
@@ -224,17 +234,22 @@ index 7ba309b..a0421c8 100644
 +				delay(1);
 +			}
 +			if (a5touch_read(bus, 0x30) & (1u << 24)) {
++				s8i2c_diag_stage = "read-fifo";
++				s8i2c_diag_byte = i;
 +				goto fail;
 +			}
 +			r[i] = (uint8_t)a5touch_read(bus, 0x38);
 +		}
 +		if (!s8i2c_wait_done(bus)) {
++			s8i2c_diag_stage = "read-done";
++			s8i2c_diag_byte = rlen;
 +			goto fail;
 +		}
 +	}
 +	a5touch_write(bus, 0x00, 0x9);
 +	return true;
 +fail:
++	s8i2c_diag_int = a5touch_read(bus, 0x24);
 +	s8i2c_reset(bus);
 +	return false;
 +}
@@ -304,6 +319,100 @@ index 7ba309b..a0421c8 100644
 +	s8ts_wait(50);
 +	if (s8ts_cmd_read(S8TS_CMD_SET_POWER_MODE, &mode, 1)) {
 +		printf("S8 TOUCH: power mode after exit %#x\n", mode);
++	}
++}
++
++static void
++s8ts_probe_ic(unsigned errors)
++{
++	uint8_t b[8] = {0};
++	if (s8ts_cmd_read(S8TS_READ_TS_STATUS, b, 4)) {
++		printf("S8 TOUCH: probe (%u): ts status %02x %02x %02x %02x\n",
++		    errors, b[0], b[1], b[2], b[3]);
++	} else {
++		printf("S8 TOUCH: probe (%u): ts status read failed (%s byte %u int 0x%x)\n",
++		    errors, s8i2c_diag_stage, s8i2c_diag_byte, s8i2c_diag_int);
++	}
++	if (s8ts_cmd_read(S8TS_READ_DEVICE_ID, b, 5)) {
++		printf("S8 TOUCH: probe (%u): id22 %02x%02x%02x%02x%02x\n",
++		    errors, b[0], b[1], b[2], b[3], b[4]);
++	} else {
++		printf("S8 TOUCH: probe (%u): id22 read failed (%s byte %u int 0x%x)\n",
++		    errors, s8i2c_diag_stage, s8i2c_diag_byte, s8i2c_diag_int);
++	}
++}
++
++/* Samsung recovers a wedged IC by re-initialising it: sec_ts_reinit() after a
++ * watchdog/ESD status event, sec_ts_reset_work() after repeated i2c errors,
++ * both of which stop the device, power-cycle its rails and run
++ * sec_ts_start_device(). XNU cannot cycle the S2MPS17 rails (the loader owns
++ * them), so this is the I2C-side equivalent: clear the event stack, reset the
++ * IC into application mode, wait for its boot-complete event and re-apply the
++ * enable sequence. Every step is logged because this runs untested. */
++static void
++s8ts_recover(unsigned errors)
++{
++	uint8_t b[8] = {0};
++	uint8_t func[2] = { S8TS_FUNC_TOUCH_PALM_WET, 0x00 };
++	uint8_t clr = S8TS_CMD_CLEAR_EVENT_STACK;
++	uint8_t reset = S8TS_CMD_SW_RESET_Y661;
++
++	printf("S8 TOUCH: recovery attempt after %u failures\n", errors);
++	printf("S8 TOUCH: recovery: clear event stack %s\n",
++	    s8ts_cmd_write(clr, NULL, 0) ? "ok" : "failed");
++	/* The reset drops the IC's finger state; tell iOS about anything we
++	 * were holding or it stays stuck down (sec_ts_locked_release_all_finger).
++	 */
++	for (unsigned i = 0; i < S8TS_FINGERS; i++) {
++		if (s8ts_down[i]) {
++			s8ts_down[i] = false;
++			if (i < 5) {
++				sweet_hid_touch((int)i, 0, s8ts_x[i], s8ts_y[i]);
++			}
++		}
++	}
++	printf("S8 TOUCH: recovery: y661 soft reset 0x42 %s\n",
++	    s8ts_cmd_write(reset, NULL, 0) ? "ok" : "failed");
++	s8ts_wait(150);
++	bool status_ok = s8ts_cmd_read(S8TS_READ_BOOT_STATUS, b, 1);
++	printf("S8 TOUCH: recovery: boot status %#x%s\n", b[0],
++	    status_ok ? "" : " (read failed)");
++	if (!status_ok || b[0] != S8TS_STATUS_APP_MODE) {
++		reset = S8TS_CMD_SW_RESET_Y761;
++		printf("S8 TOUCH: recovery: y761 soft reset 0x12 %s\n",
++		    s8ts_cmd_write(reset, NULL, 0) ? "ok" : "failed");
++		s8ts_wait(150);
++		status_ok = s8ts_cmd_read(S8TS_READ_BOOT_STATUS, b, 1);
++		printf("S8 TOUCH: recovery: boot status %#x%s\n", b[0],
++		    status_ok ? "" : " (read failed)");
++	}
++	s8i2c_reset(s8ts_i2c);          /* the controller was reset per failure */
++	if (!s8ts_wait_boot_complete()) {
++		printf("S8 TOUCH: recovery: no boot-complete event\n");
++	}
++	s8ts_exit_low_power();
++	bool func_ok = s8ts_cmd_write(S8TS_CMD_SET_FUNC, func, 2);
++	bool sense_ok = s8ts_cmd_write(S8TS_CMD_SENSE_ON, NULL, 0);
++	printf("S8 TOUCH: recovery: set func %s, sense %s\n",
++	    func_ok ? "ok" : "failed", sense_ok ? "ok" : "refused");
++	if (s8ts_cmd_read(S8TS_CMD_SET_FUNC, b, 2)) {
++		printf("S8 TOUCH: recovery: touch function now %02x %02x\n", b[0], b[1]);
++	}
++}
++
++/* sec_ts_read_event(): status/info events. An INFO event (stype 2, status id
++ * 0) is posted when the IC's own watchdog has reset it; Samsung answers with
++ * SENSE_ON and sec_ts_reinit(). We logged and dropped these before, which is
++ * one way the IC can stay silent after a self-reset. */
++static void
++s8ts_status_event(const uint8_t *ev)
++{
++	unsigned stype = (ev[0] >> 2) & 0xf;
++	printf("S8 TOUCH: status event %02x %02x %02x %02x %02x %02x %02x %02x stype %u\n",
++	    ev[0], ev[1], ev[2], ev[3], ev[4], ev[5], ev[6], ev[7], stype);
++	if (stype == S8TS_EVENT_STATUS_INFO && ev[1] == 0) {
++		printf("S8 TOUCH: IC posted boot complete (watchdog reset?), re-enabling\n");
++		s8ts_recover(0);
 +	}
 +}
 +
@@ -386,7 +495,8 @@ index 7ba309b..a0421c8 100644
 +		}
 +		if (!s8ts_cmd_read(S8TS_READ_ONE_EVENT, buf, 8)) {
 +			if (++errors <= 8 || !(errors & 255)) {
-+				printf("S8 TOUCH: event read failed (%u)\n", errors);
++				printf("S8 TOUCH: event read failed (%u) stage %s byte %u int 0x%x\n",
++				    errors, s8i2c_diag_stage, s8i2c_diag_byte, s8i2c_diag_int);
 +			}
 +			/* A full event stack seems to wedge the IC's event port:
 +			 * boot 2026-10-23 14:5x showed 63 queued, then 256
@@ -395,6 +505,20 @@ index 7ba309b..a0421c8 100644
 +			if (errors >= 4 && (errors & 3) == 0) {
 +				uint8_t clr = S8TS_CMD_CLEAR_EVENT_STACK;
 +				(void)s8ts_cmd_write(clr, NULL, 0);
++			}
++			/* Is the IC still on the bus at all? 0xaf and 0x22 go
++			 * through the same controller as the failing 0x60 read, so
++			 * an answer here means the event port - not the IC or the
++			 * bus - is stuck. First ring with this on 2026-10-23. */
++			if (errors >= 16 && !(errors & 31)) {
++				s8ts_probe_ic(errors);
++			}
++			/* A stuck event port that 0x62 does not clear is what the
++			 * stock driver answers with a re-init. Try it, but no
++			 * faster than every 64 failures (4-13 s at the observed
++			 * ~0.4 s/cost) so one attempt can take effect first. */
++			if (errors >= 64 && !(errors & 63)) {
++				s8ts_recover(errors);
 +			}
 +			s8ts_wait(20);
 +			continue;
@@ -427,8 +551,14 @@ index 7ba309b..a0421c8 100644
 +			continue;
 +		}
 +		for (unsigned i = 0; i <= left; i++) {
-+			if (buf[i * 8]) {
-+				s8ts_report(buf + i * 8);
++			uint8_t *ev = buf + i * 8;
++			if (!ev[0]) {
++				continue;
++			}
++			if ((ev[0] & 3) == 0) {
++				s8ts_status_event(ev);  /* may re-init the IC */
++			} else {
++				s8ts_report(ev);
 +			}
 +		}
 +		errors = 0;
