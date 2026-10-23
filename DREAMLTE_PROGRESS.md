@@ -748,16 +748,47 @@ touch does not. Hardware source: Samsung's `android_kernel_samsung_universal8895
   `0x880000000-0x8ffffffff` = **2048 MiB**; `S8_DRAM_MIB` (default 512,
   `tools/dreamlte/make-boot.sh`) sets both the ADT `dram-size` and the payload
   `mem_size`. 512 MiB was chosen only to get past the 2026-10-20 panic at
-  2 GiB: `kmem_range_init: vm_map_locate_space failing for claim
-  kmem_ptr_range_meta`. Cause (0124 comment): `kmem_add_extra_claims()` sizes
-  ptr/sprayqtn/data to fill the largest free `kernel_map` hole exactly, then
-  places them from a fuzzed start, so any VA lost to placement makes the last
-  claim miss. Patch 0124 has an **untested** mitigation (keep 1 GiB of the
-  hole out of the sizing when the hole is bigger than claims + 2 GiB) plus
-  `S8 KMEM:` diagnostics. 2 GiB image built with the proven kernel:
-  `shim/dreamlte/out/greatlte-ts-overflow-2g-boot.img`, SHA-256
-  `83379bb4...6d61472a3a`, ADT `dram-size 0x80000000` and payload
-  `mem_size 0x80000000` verified, same args and `s8ts` settings.
+  2 GiB.
+- **2 GiB panics (measured, 2026-10-23).**
+  `shim/dreamlte/out/greatlte-ts-overflow-2g-boot.img` (`83379bb4...472a3a`,
+  working kernel `5758423f...9ecbb27`, same args) was written to `sda7` with
+  matching on-phone SHA and read-back and panics again. **No panic text could
+  be captured from software:** the panic is before the SWEETLOG thread runs
+  (the ring still ends at flush #17, from the previous good boot) and in TWRP
+  `/sys/fs/pstore/` is empty (no `pmsg-ramoops-0`, no
+  `console-ramoops-0`), `/dev/mem` does not exist, and `/proc/last_kmsg` is
+  the TWRP kernel's. The `S8 KMEM:` line and the panic line live in the klog
+  RAM zones (`0x92180000` / `0x92004000`) and on the screen; a screen photo is
+  the only capture path. Back on 512 MiB: `greatlte-ts-overflow-boot.img`
+  (`82db76be...a123e4fcec`) was written to `sda7` with matching on-phone SHA
+  and read-back.
+- **Root cause (code, analysis).** The kernel is built from the macOS
+  xnu-8796 tree, so `vm_compressor_set_size()` takes the
+  `XNU_TARGET_OS_OSX` branch: for `max_mem <= 4 GiB` the compressor pool is
+  **16x physical RAM** (macOS assumes a huge kernel map). The compressor VA
+  claim is about equal to the pool, so it is 8 GiB at 512 MiB (check against
+  the `S8 KMEM:` claim list in `logs/sweetlog-overflow.txt`) and **32 GiB at
+  2 GiB**. Everything else in the 13 static claims is RAM-independent (zones
+  = `ZONE_MAP_VA_SIZE` 24 GiB) or small, so the static total goes 32.6 GiB ->
+  ~56 GiB while the largest free `kernel_map` hole (112 GiB map, 39-bit VA)
+  stays near 47 GiB (it shrinks slightly, the identity physmap is sized by
+  RAM). `largest_free_size -= total_claims` then underflows and placement
+  fails: the reported `kmem_range_init: vm_map_locate_space failing` claim is
+  whichever one the shuffle places when the cumulative size crosses the end of
+  the hole (`compressor` on 2026-10-20, `kmem_ptr_range_meta` in c13). The
+  0124 mitigation cannot help: it only reserves 1 GiB of headroom when the
+  hole is already larger than claims + 2 GiB.
+- **Fix built, not tested:** cap the compressor pool with the boot-arg
+  `vm_compression_limit` (a `TUNABLE`, parsed in `STARTUP_SUB_TUNABLES`,
+  before `STARTUP_SUB_KMEM`; the value is in pages of the kernel page size).
+  `vm_compression_limit=262144` is 4 GiB at 16 KiB pages (>1 GiB RAM uses
+  16 KiB pages) and 1 GiB at 4 KiB pages, and `compressor_pool_max_size`
+  (`= max_mem`) caps it either way - the pool becomes physical RAM, like the
+  iOS branch. At 2 GiB the static claims then drop to ~26 GiB, leaving ~18 GiB
+  for the kmem ptr/data/sprayqtn ranges. Image
+  `shim/dreamlte/out/greatlte-ts-overflow-2g-cmp-boot.img`, SHA-256
+  `8b2a9dd5...8adccded`, ADT `dram-size 0x80000000` and payload
+  `mem_size 0x80000000` verified, cmdline carries the new arg.
 - **Tool note:** `tools/dreamlte/pull-sweetlog.sh` skips `b/4096-1025`
   blocks, but USERDATA here is 55 254 167 552 bytes (not a multiple of
   4096), and TWRP's 32-bit shell arithmetic overflowed to `-142726`. The
@@ -772,10 +803,13 @@ touch does not. Hardware source: Samsung's `android_kernel_samsung_universal8895
 
 1. Note 8 (greatlte) touch: **works in iOS** (user report, overflow-fix boot).
    Two follow-ups: (a) pull that boot's ring if touch "stops after a while" to
-   see whether reads fail again or the worker just wedges; (b) test the 2 GiB
-   image `greatlte-ts-overflow-2g-boot.img` (`83379bb4...472a3a`) - if it
-   panics in `kmem_range_init` again, the 0124 mitigation is wrong and the
-   `S8 KMEM:` line says by how much; fall back to 1 GiB (`S8_DRAM_MIB=1024`).
+   see whether reads fail again or the worker just wedges; (b) test the
+   compressor-capped 2 GiB image `greatlte-ts-overflow-2g-cmp-boot.img`
+   (`8b2a9dd5...8adccded`, `vm_compression_limit=262144`). If it panics
+   anyway, photograph the screen: the `S8 KMEM:` line and the panic line name
+   the claim and the numbers. Fall back to 1 GiB (`S8_DRAM_MIB=1024`, same
+   boot-arg) or to the 512 MiB image `greatlte-ts-overflow-boot.img`
+   (`82db76be...a123e4fcec`).
 2. Boot the latest kernel/loader: does the frame-done copy remove the tearing,
    and does the new Mongoose order start core 0x000?
 3. Mongoose: remaining cores, L2/non-CPU power, then raise the A53 clock.
