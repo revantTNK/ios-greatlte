@@ -634,9 +634,14 @@ touch does not. Hardware source: Samsung's `android_kernel_samsung_universal8895
 
 ## Open work
 
-1. Boot the latest kernel/loader: does the frame-done copy remove the tearing,
+1. Note 8 (greatlte) touch: flash `shim/dreamlte/out/s8-tsdiag-boot.img` to
+   BOOT `sda7` (needs the user's confirmation), photograph the `TS SUMMARY:`
+   line during the 30 s hold; use `s8-tsdiag-reset-boot.img` if the IC does
+   not answer. The kernel from xnu run `39936708949` (y661-aware 0124) goes
+   into the next image once CI publishes it.
+2. Boot the latest kernel/loader: does the frame-done copy remove the tearing,
    and does the new Mongoose order start core 0x000?
-2. Mongoose: remaining cores, L2/non-CPU power, then raise the A53 clock.
-3. Zero-copy scanout through the DPU IDMA (needs the SFR update to take effect).
-4. More RAM (512 MiB of 4 GiB), vibration, backlight, Wi-Fi (BCM4361).
-5. Housekeeping: `NOTES.md` and `A5XELTE_PROGRESS.md` moved to `docs/history/` as donor history.
+3. Mongoose: remaining cores, L2/non-CPU power, then raise the A53 clock.
+4. Zero-copy scanout through the DPU IDMA (needs the SFR update to take effect).
+5. More RAM (512 MiB of 4 GiB), vibration, backlight, Wi-Fi (BCM4361).
+6. Housekeeping: `NOTES.md` and `A5XELTE_PROGRESS.md` moved to `docs/history/` as donor history.
