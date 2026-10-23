@@ -695,6 +695,26 @@ touch does not. Hardware source: Samsung's `android_kernel_samsung_universal8895
   take (`setpwr`/`pwr2`); (3) does the boot-complete event appear; (4) are
   there coordinate events while a finger is on the panel, and does gpa1-0
   follow them.
+- **Loader screen after the LPM fix (2026-10-23, photo
+  `Downloads/20261023_140911.jpg`):** `appmode` wait passed, `pwr=0x0`
+  (not in low-power mode), `setfn=0x0` (**function write accepted**),
+  `sense=0x0000200c` (**SENSE_ON 0x10 returned a NAK**),
+  `func2 data=0x6100` (read back: function is set), `pwr3 data=0x0`,
+  `ts st2 data=0x020102`, `reads=0x4f events=0x28`, `irq3=0x0`, and 40
+  **coordinate events** while a finger moved, e.g.
+  `0x84696a6b04041003` = tid 0, action 2 (move), x = 0x696 = 1686,
+  y = 0x6ab = 1707 on the 12-bit scale. The user also saw the loader react
+  to touch. So the y661 **scans and reports normally**; the LPM question is
+  closed.
+- **Root cause of "no touch in iOS":** the kernel's enable loop treated the
+  y661's **NAK on a redundant SENSE_ON** as fatal and `return`ed before
+  `kernel_thread_start()`, so no event was ever read in XNU (the old log's
+  `enable sequence failed 5 times`). Samsung's `sec_ts_start_device` logs
+  the same failure and carries on. Kernel driver now does the writes
+  best-effort, logs `enable writes func .., sense .. after N tries`, reads
+  back the function/TS status/power mode and **always starts the event
+  worker**. Patch 0124 regenerated from the local A5-patched tree
+  (`/tmp/opencode/xnu-tree/xnu`, `git apply --check` clean).
 - **Tool note:** `tools/dreamlte/pull-sweetlog.sh` skips `b/4096-1025`
   blocks, but USERDATA here is 55 254 167 552 bytes (not a multiple of
   4096), and TWRP's 32-bit shell arithmetic overflowed to `-142726`. The
@@ -707,13 +727,12 @@ touch does not. Hardware source: Samsung's `android_kernel_samsung_universal8895
 
 ## Open work
 
-1. Note 8 (greatlte) touch: the LPM-fix image is **flashed and verified**
-   (`greatlte-ts-appmode-boot.img`, `a97c7007...f4458a1`). Next: photograph
-   the loader screen (`appmode`, `fw ok`, `ts st`, `pwr`, `setpwr`, `pwr2`,
-   `bootev`, `setfn`, `sense`, `func2`, `TS SUMMARY`) while touching during
-   the 20 s poll, then test iOS. If the loader writes succeed but the kernel
-   still logs `enable sequence failed`, the kernel-side write path or the
-   `0xE4` exit is wrong; pull the ring via TWRP.
+1. Note 8 (greatlte) touch: **loader proven working** (40 coordinate events,
+   `sense` NAK tolerated by the kernel now). Patch 0124 has the best-effort
+   enable + unconditional worker start; when the CI kernel lands, build a
+   boot image (loader already at `greatlte-ts-appmode-boot.img` settings) and
+   flash it. Look for `enable writes func ok, sense refused`, then
+   `touch function now 6100`, `worker started` and `down id=0` in the ring.
 2. Boot the latest kernel/loader: does the frame-done copy remove the tearing,
    and does the new Mongoose order start core 0x000?
 3. Mongoose: remaining cores, L2/non-CPU power, then raise the A53 clock.

@@ -493,23 +493,27 @@ dreamlte_touch_start(void)
 
 	uint8_t func[2] = { S8TS_FUNC_TOUCH_PALM_WET, 0x00 };
 	uint8_t sense = S8TS_CMD_SENSE_ON;
-	/* Boots g1 and p4: "enable sequence failed" once, and the phone had no
-	 * touch for the whole boot. Reset the bus and try again a few times. */
+	/* The y661 ACKs SET_FUNC but can refuse SENSE_ON (0x10) with a NAK
+	 * while it is already scanning - observed in the loader on 2026-10-23:
+	 * setfn=0x0, sense=0x200c, and 40 coordinate events right after. Samsung
+	 * logs the same failure and carries on (sec_ts_start_device). Bailing
+	 * here cost the whole boot, so the writes are best-effort now and the
+	 * register read-back decides whether the IC is running. */
+	bool func_ok = false, sense_ok = false;
 	unsigned tries = 0;
-	while (!s8ts_cmd_write(S8TS_CMD_SET_FUNC, func, 2) ||
-	    !s8ts_cmd_write(sense, NULL, 0)) {
-		if (++tries == 5) {
-			printf("S8 TOUCH: enable sequence failed %u times\n", tries);
-			return;
+	for (tries = 0; tries < 5; tries++) {
+		func_ok = s8ts_cmd_write(S8TS_CMD_SET_FUNC, func, 2);
+		if (func_ok) {
+			sense_ok = s8ts_cmd_write(sense, NULL, 0);
+			if (sense_ok) {
+				break;
+			}
 		}
 		s8ts_wait(20);
 		s8i2c_reset(s8ts_i2c);
 	}
-	if (tries != 0) {
-		printf("S8 TOUCH: enabled after %u retries\n", tries);
-	}
-	printf("S8 TOUCH: enabled (func %#x), irq line %u\n", func[0],
-	    a5touch_read(s8ts_alive, S8TS_GPA1_DAT) & 1u);
+	printf("S8 TOUCH: enable writes func %s, sense %s after %u tries\n",
+	    func_ok ? "ok" : "failed", sense_ok ? "ok" : "refused", tries);
 	if (s8ts_cmd_read(S8TS_CMD_SET_FUNC, b, 2)) {
 		printf("S8 TOUCH: touch function now %02x %02x\n", b[0], b[1]);
 	}
@@ -517,6 +521,11 @@ dreamlte_touch_start(void)
 		printf("S8 TOUCH: ts status after enable %02x %02x %02x %02x\n",
 		    b[0], b[1], b[2], b[3]);
 	}
+	if (s8ts_cmd_read(S8TS_CMD_SET_POWER_MODE, b, 1)) {
+		printf("S8 TOUCH: power mode now %#x\n", b[0]);
+	}
+	printf("S8 TOUCH: irq line %u\n",
+	    a5touch_read(s8ts_alive, S8TS_GPA1_DAT) & 1u);
 	if (kernel_thread_start(s8ts_thread, NULL, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
 	} else {

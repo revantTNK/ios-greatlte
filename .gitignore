@@ -16,3 +16,4 @@ shim/dreamlte/out/
 logs/
 # Samsung ACPM DVFS plugin blob (tools/dreamlte/fetch-acpm-fw.sh)
 shim/dreamlte/firmware/
+node_modules/
