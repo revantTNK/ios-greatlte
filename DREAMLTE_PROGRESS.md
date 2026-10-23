@@ -572,6 +572,64 @@ launchd logs, because the loader's pmsg copy is overwritten by the kernel):
   0x164840e0, ACPM DVFS id 0x0B040004). First milestone: "the Mali does one
   job" (power on, read GPU_ID, run one write-value job).
 
+## Note 8 (greatlte) touch (2026-10-23)
+
+The user's second phone is a Galaxy Note 8 (Exynos, `greatlte`, SM-N950F/N).
+Buttons, charging indicator and the display path come up with the S8 images;
+touch does not. Hardware source: Samsung's `android_kernel_samsung_universal8895`
+(`tw90-android`, `arch/arm64/boot/dts/exynos/exynos8895-greatlte_common.dtsi`).
+
+- **The touch controller is a different chip family.** The S8 node uses
+  `sec,sec_ts` with the S6SY761 ("y761") and the mainline-style protocol this
+  port already speaks. The Note 8 node is also `sec,sec_ts` at `0x48`, but
+  Samsung binds it with `drivers/input/touchscreen/sec_ts_y661`, project
+  `"GREAT", "N950"`, firmware `tsp_sec/y661_great.fw`, `afe_base 0x117`,
+  `max_coords 4095 4095`. Everything around it is the same:
+  hsi2c_23/USI09 `0x108e0000`, IRQ gpa1-0, S2MPS17 LDO34 `tsp_io` 1.85 V and
+  LDO35 `tsp_avdd` **3.3 V** (the S8 DT says 3.0 V; commit 053ae52 already
+  raised the loader to 3.3 V).
+- **Protocol comparison (read, not guessed).** `sec_ts.h` from the two
+  drivers: same command numbers for `SENSE_ON 0x10`, `SET_TOUCHFUNCTION 0x30`,
+  `READ_FW_INTEGRITY 0x21`, `READ_DEVICE_ID 0x22` (5 bytes), `READ_PANEL_INFO
+  0x23`, `READ_ID 0x52` (3 bytes), `READ_BOOT_STATUS 0x55` (0x20 = app,
+  0x10 = boot), `READ_ONE_EVENT 0x60` / `READ_ALL_EVENT 0x61` (8-byte events,
+  same bit fields), `READ_TS_STATUS 0xAF`. Differences that matter:
+  `SW_RESET` is **0x42** on y661 and 0x12 on y761, and the default function
+  bits are `TOUCH|PALM|WET = 0x61` (both families). So a y661 should answer
+  this driver; the S8's own log line ("id ac3761", status 0x20) is just its
+  ID read through 0x52.
+- **Loader (`shim/dreamlte/touch_probe.c`)** now probes both: boot status,
+  `0x52`, `0x22`, `0x23`, `0x21`, `0xaf`, current `0x30`, IRQ level; soft
+  resets with 0x42 and 0x12 when not in app mode; drains the queue until the
+  boot-complete INFO event; writes function 0x61 and `SENSE_ON`; then polls
+  `0x60` for `s8tsprobe=N` seconds (default 4, max 60) whether or not the IRQ
+  line asserts, and counts reads/events. `s8tsreset=1` power-cycles LDO34/35
+  first (state after S-Boot may matter). `s8tspause=N` holds the loader
+  screen N seconds so the output can be photographed.
+- **Kernel (`tools/dreamlte/dreamlte_touch.c`, patch 0124)** no longer returns
+  when the boot status is not 0x20: it soft-resets (0x42 then 0x12), reads and
+  logs `0x52`/`0x22`/`0xaf`/`0x21`, waits for the boot-complete event, writes
+  function 0x61 + `SENSE_ON` with the old retries, and logs the IRQ level.
+  New boot args: `s8tspoll=1` ignores the IRQ line and reads the queue
+  unconditionally (for a wrong or never-asserting IRQ pin), `s8tsdebug=N`
+  prints the first N raw 8-byte events. The S8 path is unchanged apart from
+  the function byte 0x01 -> 0x61, which is what Samsung's y761 driver sends.
+- Regenerated `xnu/patches/0124-dreamlte-s8.patch` from
+  `tools/dreamlte/prep-xnu-tree.sh` (xnu-8796.141.3 + the A5 patches) +
+  `apply-dreamlte.py`; `git apply --check` passes on that tree. CI run IDs and
+  the phone result are to be filled in after the next test.
+- **Not tested on a phone.** No Note 8 was attached while this was written.
+  Images built locally with the *old* kernel (loader diagnostics only):
+  `shim/dreamlte/out/s8-tsdiag-boot.img` (SHA-256 `0c7379dd...9d7177`,
+  `s8tsprobe=20 s8tspause=30`, same boot args as the user's `s8-ios-boot.img`)
+  and `s8-tsdiag-reset-boot.img` (same + `s8tsreset=1`). Flashing BOOT `sda7`
+  needs the user's confirmation.
+- What the probe should answer, in order: (1) does `0x55`/`0x52` return at
+  all (IC powered, bus and pins right); (2) app mode or boot mode after the
+  resets; (3) does the boot-complete event appear; (4) are there coordinate
+  events while a finger is on the panel, and does gpa1-0 follow them. A `0x52`
+  value that is not `ac3761` would confirm the y661.
+
 ## Open work
 
 1. Boot the latest kernel/loader: does the frame-done copy remove the tearing,

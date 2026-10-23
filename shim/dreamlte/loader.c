@@ -608,7 +608,7 @@ uint64_t dl_main(uintptr_t dtb, uint64_t el, uint64_t sctlr)
 	acpm_cpu_clocks(cmdline_u32(p->cmdline, "s8lit"), acpm_word);
 	append_bootarg(ba, " s8acpm=", acpm_line, acpm_len);
 	clean(ba_pa, ba_pa + PAGE_SIZE);
-	touch_probe(kv, out);
+	touch_probe(kv, out, (const char *)p->cmdline);
 	battery_probe(kv, out);
 	display_probe(kv, out);
 #if MNGS_DIAG
