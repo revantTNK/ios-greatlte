@@ -848,7 +848,7 @@ touch does not. Hardware source: Samsung's `android_kernel_samsung_universal8895
     ~7 min of iOS use, and TWRP cannot capture it (no `/dev/mem`, empty
     `/sys/fs/pstore`, `/proc/last_kmsg` is TWRP's own log; the SWEETLOG ring
     only holds successful boots.
-- **Diagnostic + recovery kernel built (2026-10-23), flash pending:** CI run
+- **Diagnostic + recovery kernel built and flashed (2026-10-23):** CI run
   **39960479295** (xnu, push, success), kernel SHA-256
   `adf1c12428a450c7b564ea73bb96cc97753999e48d198986a6601714458c807e` (LSE scan
   1 hit, `<K256>` only), from driver + `0124` commit `aab3b9985`. Image
@@ -892,8 +892,10 @@ touch does not. Hardware source: Samsung's `android_kernel_samsung_universal8895
 1. Note 8 (greatlte) touch: **works in iOS, then wedges after ~7 min of use**
    (user report; ring evidence in the section above). The diagnostic/recovery
    kernel is built (CI 39960479295, image `greatlte-ts-diag-boot.img`
-   `5f8d971f...3b3fde7`) and waiting on the user to confirm the `sda7` flash.
-   Run it for ~10 min of use, then pull the ring: the new
+   `5f8d971f...3b3fde7`) and **flashed to `sda7` on 2026-10-23 with matching
+   on-phone and read-back SHA-256**; the user was asked to run it for ~10 min
+   of use, note whether touch returns on its own (recovery) and how long that
+   takes, then reboot to TWRP for the ring pull. The new
    `event read failed .. stage .. int ..` / `probe (N)` / `recovery attempt`
    lines say whether the IC answers while events fail and which recovery step
    it refuses. If recovery works, touch should come back without the reboot.
