@@ -674,30 +674,42 @@ touch does not. Hardware source: Samsung's `android_kernel_samsung_universal8895
   and polls. The kernel driver in CI run `39941292457` (commit `fed6c3d`)
   has the same `s8ts_exit_low_power()`; kernel SHA-256
   `44508ec9...7562e3`, `lse-scan` 1 (the pre-existing `<K256>`).
-- **Next image:** `shim/dreamlte/out/greatlte-ts-appmode-boot.img`, SHA-256
-  `a97c7007...f4458a1`, kernel `44508ec9...`, loader 66 848 bytes, args
-  `s8tsreset=1 s8tspause=40 s8tsprobe=20 s8tsdebug=8 s8tspoll=1`.
-  `s8tsreset=1` power-cycles LDO34/35, so the IC gets a clean POR before
-  the 2 s application-mode wait.
-- What the next probe answers, in order: (1) does the IC reach `0x55 = 0x20`
-  within 2 s of a clean POR (`appmode`); (2) is firmware integrity `0x80`
-  in application mode (`fw ok`); (3) does the boot-complete event appear;
-  (4) are there coordinate events while a finger is on the panel, and does
-  gpa1-0 follow them. If `fw ok` stays `0x00` in application mode, the IC
-  firmware is invalid and must be downloaded (`SEC_TS_FW_UPDATE_ON_PROBE`,
-  `tsp_sec/y661_great.fw`), which the loader cannot do yet.
+- **Kernel ring from the previous boot** (pulled in TWRP to the git-ignored
+  `logs/sweetlog-ts530.txt`, flush #113, 158 125 bytes): `boot status 0x20`,
+  `id52 acb661`, `id22 5345b66100`, `ts status 00 03 00 00`,
+  **`fw integrity 0x80 ok`**, `no boot-complete event, trying anyway`,
+  **`enable sequence failed 5 times`**. So the firmware is valid and the IC
+  is in application mode minutes after boot; **the function/sense writes are
+  the thing that fails**, while every read succeeds. Most likely the IC is in
+  low-power mode, where only the `0xE4` write is accepted — `SENSE_ON` alone
+  does not resume it. The `fed6c3d` kernel adds that exit.
+- **Flashed 2026-10-23:** `shim/dreamlte/out/greatlte-ts-appmode-boot.img`
+  (SHA-256 `a97c7007...f4458a1`, 16 842 768 bytes, kernel `44508ec9...`,
+  loader 66 848 bytes, args `s8tsreset=1 s8tspause=40 s8tsprobe=20
+  s8tsdebug=8 s8tspoll=1`) to BOOT `sda7`. On-phone SHA-256 was checked
+  before the write and the first 16 842 768 bytes read back **identical**.
+  It power-cycles LDO34/35, waits up to 2 s for application mode, prints
+  `appmode`/`fw ok`/`ts st`/`pwr`/`setpwr`, enables and polls 20 s.
+- What the next probe answers: (1) does the IC reach `0x55 = 0x20` after a
+  clean POR (`appmode`); (2) does `0xE4` read 1 (`pwr`) and does writing 0
+  take (`setpwr`/`pwr2`); (3) does the boot-complete event appear; (4) are
+  there coordinate events while a finger is on the panel, and does gpa1-0
+  follow them.
+- **Tool note:** `tools/dreamlte/pull-sweetlog.sh` skips `b/4096-1025`
+  blocks, but USERDATA here is 55 254 167 552 bytes (not a multiple of
+  4096), and TWRP's 32-bit shell arithmetic overflowed to `-142726`. The
+  correct skip is `(b - 1025*4096)/4096` = **13488762**; with the naive read
+  the `SWEETLOG` header lands at offset 4096 of the pulled area.
 
 ## Open work
 
-1. Note 8 (greatlte) touch: with the user's confirmation, flash
-   `shim/dreamlte/out/greatlte-ts-appmode-boot.img` (SHA-256
-   `a97c7007...f4458a1`) to BOOT `sda7`. It power-cycles the touch rails,
-   waits for application mode, prints `appmode`/`fw ok`/`ts st`/`pwr`, then
-   holds the screen 40 s: photograph `TS SUMMARY:` while touching during the
-   20 s poll. If `fw ok` stays 0x00 in application mode, the IC needs its
-   firmware downloaded (`tsp_sec/y661_great.fw`); that is the next project.
-   Raw kernel events with `s8tsdebug=8` land in the UFS log ring (TWRP +
-   `tools/dreamlte/pull-sweetlog.sh`).
+1. Note 8 (greatlte) touch: the LPM-fix image is **flashed and verified**
+   (`greatlte-ts-appmode-boot.img`, `a97c7007...f4458a1`). Next: photograph
+   the loader screen (`appmode`, `fw ok`, `ts st`, `pwr`, `setpwr`, `pwr2`,
+   `bootev`, `setfn`, `sense`, `func2`, `TS SUMMARY`) while touching during
+   the 20 s poll, then test iOS. If the loader writes succeed but the kernel
+   still logs `enable sequence failed`, the kernel-side write path or the
+   `0xE4` exit is wrong; pull the ring via TWRP.
 2. Boot the latest kernel/loader: does the frame-done copy remove the tearing,
    and does the new Mongoose order start core 0x000?
 3. Mongoose: remaining cores, L2/non-CPU power, then raise the A53 clock.
