@@ -42,6 +42,8 @@
 #define S8TS_READ_ONE_EVENT     0x60
 #define S8TS_READ_ALL_EVENT     0x61
 #define S8TS_READ_TS_STATUS     0xaf
+#define S8TS_CMD_SET_POWER_MODE 0xe4  /* sec_ts: 0 = touch, 1 = low power */
+#define S8TS_POWER_MODE_TOUCH   0x00
 #define S8TS_STATUS_APP_MODE    0x20
 #define S8TS_FUNC_TOUCH_PALM_WET 0x61u  /* sec_ts default: TOUCH|PALM|WET */
 
@@ -176,6 +178,33 @@ s8ts_wait_boot_complete(void)
 		s8ts_wait(10);
 	}
 	return false;
+}
+
+/* S-Boot (or a previous iOS boot) can leave the IC in low-power mode
+ * (0xE4 = 1). SENSE_ON does not resume scanning then; Samsung's
+ * sec_ts_set_lowpowermode(TO_TOUCH_MODE) writes 0xE4 = 0, waits 50 ms and
+ * reads it back. */
+static void
+s8ts_exit_low_power(void)
+{
+	uint8_t mode = 0xff;
+	uint8_t touch = S8TS_POWER_MODE_TOUCH;
+	if (!s8ts_cmd_read(S8TS_CMD_SET_POWER_MODE, &mode, 1)) {
+		printf("S8 TOUCH: power mode read failed\n");
+		return;
+	}
+	printf("S8 TOUCH: power mode %#x\n", mode);
+	if (mode == S8TS_POWER_MODE_TOUCH) {
+		return;
+	}
+	if (!s8ts_cmd_write(S8TS_CMD_SET_POWER_MODE, &touch, 1)) {
+		printf("S8 TOUCH: exit low-power failed\n");
+		return;
+	}
+	s8ts_wait(50);
+	if (s8ts_cmd_read(S8TS_CMD_SET_POWER_MODE, &mode, 1)) {
+		printf("S8 TOUCH: power mode after exit %#x\n", mode);
+	}
 }
 
 static void
@@ -460,6 +489,7 @@ dreamlte_touch_start(void)
 	if (!s8ts_wait_boot_complete()) {
 		printf("S8 TOUCH: no boot-complete event, trying anyway\n");
 	}
+	s8ts_exit_low_power();
 
 	uint8_t func[2] = { S8TS_FUNC_TOUCH_PALM_WET, 0x00 };
 	uint8_t sense = S8TS_CMD_SENSE_ON;
@@ -480,6 +510,13 @@ dreamlte_touch_start(void)
 	}
 	printf("S8 TOUCH: enabled (func %#x), irq line %u\n", func[0],
 	    a5touch_read(s8ts_alive, S8TS_GPA1_DAT) & 1u);
+	if (s8ts_cmd_read(S8TS_CMD_SET_FUNC, b, 2)) {
+		printf("S8 TOUCH: touch function now %02x %02x\n", b[0], b[1]);
+	}
+	if (s8ts_cmd_read(S8TS_READ_TS_STATUS, b, 4)) {
+		printf("S8 TOUCH: ts status after enable %02x %02x %02x %02x\n",
+		    b[0], b[1], b[2], b[3]);
+	}
 	if (kernel_thread_start(s8ts_thread, NULL, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
 	} else {

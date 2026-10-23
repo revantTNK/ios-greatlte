@@ -642,8 +642,27 @@ touch does not. Hardware source: Samsung's `android_kernel_samsung_universal8895
   SHA-256 checked, `dd`-written to `/dev/block/sda7` with `conv=fsync` and read
   back: **`f366397e...51269b`, identical**. The previous BOOT was saved first
   to the git-ignored `backup/BOOT-greatlte-before-touch.img` (SHA-256
-  `658ba54f...63296d`, whole 40 MiB). Phone rebooted from TWRP; the loader
-  probe result is pending (photo of `TS SUMMARY:`).
+  `658ba54f...63296d`, whole 40 MiB). Phone rebooted from TWRP.
+- **First phone evidence (loader screen, 2026-10-23):**
+  `TS SUMMARY: boot=0x20 id52=0xacb661 id22=0x5345b66100 events=0x0`.
+  Observations, not guesses: the controller **answers on I2C**, is in
+  **application mode** (`0x20`), and is **not an S6SY761** — `id52` is
+  `0xacb661`, whereas the S8's S6SY761 reads `0xac3761`. The five-byte
+  `READ_DEVICE_ID 0x22` returns `53 45 b6 61 00`. The user touched the panel
+  throughout the 20 s poll, and `events=0`, so this is a real "no events", not
+  an idle panel. The same boot loaded iOS with the new kernel (boot worked)
+  and still had no touch.
+- **Next hypothesis (not yet observed on the phone): low-power mode.** Samsung
+  enters LPM with `SET_POWER_MODE 0xE4 = 1` (`sec_ts_pm_suspend`) and leaves it
+  with `sec_ts_set_lowpowermode(TO_TOUCH_MODE)`: write `0xE4 = 0`, wait 50 ms,
+  read it back. `SENSE_ON 0x10` alone does **not** resume scanning. S-Boot can
+  leave the IC in that state, which would explain app mode + readable IDs +
+  no events. New probe reads `0xE4` before/after the write (`pwr`, `setpwr`,
+  `pwr2`, `pwr3`), re-reads TS status (`ts st2`), reads the touch function back
+  (`func2`), and the summary now ends `... pwr=.. events=..`; the kernel
+  driver calls `s8ts_exit_low_power()` after the boot-complete wait and logs
+  the function/status read-backs. Loader SHA-256 after this change is built
+  into the next image; kernel patch 0124 was regenerated again.
 - What the probe should answer, in order: (1) does `0x55`/`0x52` return at
   all (IC powered, bus and pins right); (2) app mode or boot mode after the
   resets; (3) does the boot-complete event appear; (4) are there coordinate

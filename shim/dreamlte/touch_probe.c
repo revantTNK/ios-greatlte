@@ -232,7 +232,7 @@ static uint32_t reg1(uint8_t cmd, uint8_t *b, unsigned n, uint8_t *v)
 void touch_probe(void (*kv_fn)(const char *, uint64_t), void (*out_fn)(const char *),
     const char *cmdline)
 {
-	uint8_t c, b[11], v = 0;
+	uint8_t c, b[11], v = 0, pwr = 0xff;
 	uint32_t st, bst;
 	uint64_t id52 = 0, id22 = 0;
 
@@ -327,6 +327,9 @@ void touch_probe(void (*kv_fn)(const char *, uint64_t), void (*out_fn)(const cha
 	c = 0x30;	/* SET/GET_TOUCHFUNCTION, two bytes */
 	st = xfer(&c, 1, b, 2);
 	dump("func", b, 2, st);
+	c = 0xe4;	/* SET/GET_POWER_MODE: 0 = touch, 1 = low power */
+	st = xfer(&c, 1, b, 1);
+	dump("pwr", b, 1, st);
 	kv("irq", rd(GPA1 + 4) & 1);
 	out("\n");
 
@@ -365,11 +368,35 @@ void touch_probe(void (*kv_fn)(const char *, uint64_t), void (*out_fn)(const cha
 	kv("bootev", bootev);
 	out("\n");
 
+	/* S-Boot can leave the IC in low-power mode (0xE4 = 1; Samsung's
+	 * sec_ts_set_lowpowermode enters it on screen off). SENSE_ON alone
+	 * does not resume scanning: write TO_TOUCH_MODE (0xE4 = 0) and read
+	 * it back, exactly like sec_ts_set_lowpowermode(TO_TOUCH_MODE). */
+	uint8_t pm[2] = {0xe4, 0x00};
+	kv("setpwr", xfer(pm, 2, 0, 0));
+	delay_ms(50);
+	c = 0xe4;
+	st = xfer(&c, 1, b, 1);
+	dump("pwr2", b, 1, st);
+	c = 0xaf;
+	st = xfer(&c, 1, b, 4);
+	dump("ts st2", b, 4, st);
+	out("\n");
+
 	/* y661 and y761 both default to TOUCH|PALM|WET = 0x61 (little endian). */
 	uint8_t fn[3] = {0x30, 0x61, 0x00};
 	kv("setfn", xfer(fn, 3, 0, 0));
 	c = 0x10;	/* SENSE_ON */
 	kv("sense", xfer(&c, 1, 0, 0));
+	delay_ms(20);
+	c = 0x30;
+	st = xfer(&c, 1, b, 2);
+	dump("func2", b, 2, st);
+	c = 0xe4;
+	st = xfer(&c, 1, b, 1);
+	dump("pwr3", b, 1, st);
+	if (!st)
+		pwr = b[0];
 	out("\n");
 	kv("irq2", rd(GPA1 + 4) & 1);
 	out("\n");
@@ -410,6 +437,7 @@ void touch_probe(void (*kv_fn)(const char *, uint64_t), void (*out_fn)(const cha
 	kv("boot", v);
 	kv("id52", id52);
 	kv("id22", id22);
+	kv("pwr", pwr);
 	kv("events", got);
 	out("\nTOUCH probe done\n");
 
