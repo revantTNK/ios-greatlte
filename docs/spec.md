@@ -26,6 +26,17 @@ Galaxy S8, Exynos 8895 (`dreamlte`): SM-G950F (upstream port) and SM-G950N (this
 | Haptics | motor (dreamlte_motor / DRV2624 variant) | Taptic stand-in | None |
 | Other | NFC, fingerprint, eSE, cameras (IMX333, 3H1...), modem (Shannon) | | Out of scope |
 
+### Note 8 (greatlte, SM-N950F/N)
+
+Same SoC, memory map, display size and PMIC. Read from Samsung's
+`exynos8895-greatlte_common.dtsi` (`exynos-linux-stable/greatlte`,
+`tw90-android`):
+
+| Block | Part / address | Difference from the S8 |
+| --- | --- | --- |
+| Touch | `sec,sec_ts` at 0x48 on the same hsi2c_23 0x108e0000, IRQ gpa1-0, S2MPS17 LDO34/35 | The controller is Samsung's **y661** (`drivers/input/touchscreen/sec_ts_y661`, firmware `tsp_sec/y661_great.fw`, project `GREAT`/`N950`), not the S6SY761. `tsp_avdd` LDO35 is 3.3 V (S8 DT: 3.0 V). Registers and the 8-byte event format are shared; `SW_RESET` is 0x42 (y761: 0x12). |
+| S Pen | Wacom W9018 on hsi2c_10 `0x10490000`, IRQ gpa1-? plus `gpe7-2` 3.3 V LDO | Not an iOS input path yet; finger touch is the y661. |
+
 ## 2. Partitions and what may be written
 
 Only BOOT (`sda7`, 40 MiB) and USERDATA (`sda24`, 54.8 GiB) are ever written, from TWRP over adb, with an exact read-back hash. EFS (`sda3`), RECOVERY (`sda8`), the bootloader LUNs (`sdb`, `sdc`) and everything else are read-only for this project. TWRP has no `/dev/block/by-name`; the `sdaN` numbers above were checked on both the G950F and the G950N. Backups live in the git-ignored `backup/`.

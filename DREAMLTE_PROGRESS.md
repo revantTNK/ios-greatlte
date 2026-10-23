@@ -620,10 +620,12 @@ touch does not. Hardware source: Samsung's `android_kernel_samsung_universal8895
   the phone result are to be filled in after the next test.
 - **Not tested on a phone.** No Note 8 was attached while this was written.
   Images built locally with the *old* kernel (loader diagnostics only):
-  `shim/dreamlte/out/s8-tsdiag-boot.img` (SHA-256 `0c7379dd...9d7177`,
+  `shim/dreamlte/out/s8-tsdiag-boot.img` (SHA-256 `6d20d112...b23fdc`,
   `s8tsprobe=20 s8tspause=30`, same boot args as the user's `s8-ios-boot.img`)
-  and `s8-tsdiag-reset-boot.img` (same + `s8tsreset=1`). Flashing BOOT `sda7`
-  needs the user's confirmation.
+  and `s8-tsdiag-reset-boot.img` (SHA-256 `4af66ece...a9961`, same plus
+  `s8tsreset=1 s8tspoll=1`). The loader ends with a one-line
+  `TS SUMMARY: boot=.. id52=.. id22=.. events=..` for a photo. Flashing BOOT
+  `sda7` needs the user's confirmation.
 - What the probe should answer, in order: (1) does `0x55`/`0x52` return at
   all (IC powered, bus and pins right); (2) app mode or boot mode after the
   resets; (3) does the boot-complete event appear; (4) are there coordinate

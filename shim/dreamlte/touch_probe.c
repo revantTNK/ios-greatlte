@@ -234,6 +234,7 @@ void touch_probe(void (*kv_fn)(const char *, uint64_t), void (*out_fn)(const cha
 {
 	uint8_t c, b[11], v = 0;
 	uint32_t st, bst;
+	uint64_t id52 = 0, id22 = 0;
 
 	kv = kv_fn;
 	out = out_fn;
@@ -304,9 +305,16 @@ void touch_probe(void (*kv_fn)(const char *, uint64_t), void (*out_fn)(const cha
 	c = 0x52;	/* READ_ID */
 	st = xfer(&c, 1, b, 3);
 	dump("id52", b, 3, st);
+	if (!st) {
+		id52 = (uint64_t)b[0] << 16 | (uint64_t)b[1] << 8 | b[2];
+	}
 	c = 0x22;	/* READ_DEVICE_ID, five bytes */
 	st = xfer(&c, 1, b, 5);
 	dump("id22", b, 5, st);
+	if (!st) {
+		for (unsigned i = 0; i < 5; i++)
+			id22 = id22 << 8 | b[i];
+	}
 	c = 0x23;	/* PANEL_INFO: max_x/max_y be16, nodes at [8], [9] */
 	st = xfer(&c, 1, b, 11);
 	dump("panel", b, 8, st);
@@ -394,6 +402,15 @@ void touch_probe(void (*kv_fn)(const char *, uint64_t), void (*out_fn)(const cha
 	kv("reads", reads);
 	kv("events", got);
 	kv("irq3", rd(GPA1 + 4) & 1);
+	out("\n");
+
+	/* One line for a photo: everything needed to tell the failure modes
+	 * apart. boot 20 = application mode, ac3761 = S8's S6SY761 id. */
+	out("TS SUMMARY: ");
+	kv("boot", v);
+	kv("id52", id52);
+	kv("id22", id22);
+	kv("events", got);
 	out("\nTOUCH probe done\n");
 
 	/* Keep the loader screen (and this output) for photos: s8tspause=20
