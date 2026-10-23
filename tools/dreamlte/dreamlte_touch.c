@@ -48,9 +48,45 @@
 #define S8TS_POWER_MODE_TOUCH   0x00
 #define S8TS_STATUS_APP_MODE    0x20
 #define S8TS_FUNC_TOUCH_PALM_WET 0x61u  /* sec_ts default: TOUCH|PALM|WET */
-#define S8TS_EVENT_STATUS_INFO  2       /* sec_ts TYPE_STATUS_EVENT_INFO */
+/* Event id is ev[0] & 3 (sec_ts.h): 0 coordinate, 1 status. A status event's
+ * stype is bits 5:2 of ev[0], its id/data_1 are ev[1]/ev[2]. Getting the id
+ * test wrong routes every finger event to the status handler (2026-10-23). */
+#define S8TS_EVENT_COORDINATE   0u      /* SEC_TS_COORDINATE_EVENT */
+#define S8TS_EVENT_STATUS       1u      /* SEC_TS_STATUS_EVENT */
+#define S8TS_EVENT_STATUS_ERR   1       /* TYPE_STATUS_EVENT_ERR */
+#define S8TS_EVENT_STATUS_INFO  2       /* TYPE_STATUS_EVENT_INFO */
+#define S8TS_ACK_BOOT_COMPLETE  0x00u   /* SEC_TS_ACK_BOOT_COMPLETE: status id */
+#define S8TS_WATCHDOG_DATA_1    0x20u   /* sec_ts.c: "watchdog reset" marker */
+#define S8TS_ERR_EVENT_QUEUE_FULL 0x01u /* SEC_TS_ERR_EVENT_QUEUE_FULL */
+#define S8TS_ERR_EVENT_ESD      0x02u   /* SEC_TS_ERR_EVENT_ESD */
+/* IC-side re-inits are capped and spaced: an event the IC repeats (or a
+ * boot-complete we fail to consume) must never become a reset loop. */
+#define S8TS_MAX_RECOVERIES     4u
+#define S8TS_RECOVER_COOLDOWN_MS 60000u
+
+/* USI09/hsi2c_23 bring-up registers, copied from shim/dreamlte/touch_probe.c
+ * so the wedge dump and the bus recovery use the loader's own values. */
+#define S8TS_CMU_PERIC1_PA      0x10800000u
+#define S8TS_CMU_TOP_PA         0x15a80000u
+#define S8TS_SYSREG_PA          0x10821000u
+#define S8TS_GPE3_PA            0x10980000u
+#define S8TS_P1_USI09_PCLK      0x20acu
+#define S8TS_P1_USI09_SCLK      0x20b0u
+#define S8TS_P1_USI09_USER_MUX  0x0240u
+#define S8TS_SYSREG_USI09       0x101cu
+#define S8TS_GPE3_CON           0x120u
+#define S8TS_TOP_USI09_MUX      0x10e0u
+#define S8TS_TOP_USI09_DIV      0x18e8u
+#define S8TS_TOP_USI09_GATE     0x20ecu
+#define S8TS_GATE_ON            ((1u << 21) | (1u << 20))  /* MANUAL|CG_VALUE */
+#define S8TS_USI_V1_I2C0_1      0x3u    /* stock "hsi2c0_hsi2c1" */
 
 static vm_offset_t s8ts_i2c, s8ts_alive, s8bat_i2c;
+static vm_offset_t s8ts_cmu, s8ts_cmutop, s8ts_sysreg, s8ts_gpe3;
+static unsigned s8ts_recoveries;                /* IC re-inits this boot */
+static uint64_t s8ts_recover_deadline;          /* mach time, no re-init before */
+static unsigned s8ts_wedge_dumps;               /* write-stage wedges seen */
+static unsigned s8ts_status_logged;             /* status events logged */
 static int s8ts_sleep;
 static int s8ts_native;         /* sweetfb_native: iOS sees the whole panel */
 static int s8ts_scaled;         /* sweetfb_scale=1: 1125x2436 scaled to the panel height */
@@ -65,6 +101,11 @@ static uint16_t s8ts_x[S8TS_FINGERS], s8ts_y[S8TS_FINGERS];
 static const char *s8i2c_diag_stage = "-";
 static uint32_t s8i2c_diag_int;
 static unsigned s8i2c_diag_byte;
+#define S8I2C_STAGE_NONE        0u
+#define S8I2C_STAGE_WRITE       1u      /* the address/command write never completed */
+#define S8I2C_STAGE_READ_FIFO   2u
+#define S8I2C_STAGE_READ_DONE   3u
+static unsigned s8i2c_diag_stage_code;
 
 /* i2c-exynos5.c: reset, Exynos8895 fast-mode timing, master auto mode. */
 static void
@@ -122,6 +163,7 @@ s8i2c_xfer(vm_offset_t bus, unsigned addr, const uint8_t *w, unsigned wlen,
 		}
 		if (!s8i2c_wait_done(bus)) {
 			s8i2c_diag_stage = "write-done";
+			s8i2c_diag_stage_code = S8I2C_STAGE_WRITE;
 			s8i2c_diag_byte = 0xffu;
 			goto fail;
 		}
@@ -137,6 +179,7 @@ s8i2c_xfer(vm_offset_t bus, unsigned addr, const uint8_t *w, unsigned wlen,
 			}
 			if (a5touch_read(bus, 0x30) & (1u << 24)) {
 				s8i2c_diag_stage = "read-fifo";
+				s8i2c_diag_stage_code = S8I2C_STAGE_READ_FIFO;
 				s8i2c_diag_byte = i;
 				goto fail;
 			}
@@ -144,6 +187,7 @@ s8i2c_xfer(vm_offset_t bus, unsigned addr, const uint8_t *w, unsigned wlen,
 		}
 		if (!s8i2c_wait_done(bus)) {
 			s8i2c_diag_stage = "read-done";
+			s8i2c_diag_stage_code = S8I2C_STAGE_READ_DONE;
 			s8i2c_diag_byte = rlen;
 			goto fail;
 		}
@@ -179,20 +223,25 @@ s8ts_cmd_write(uint8_t cmd, const uint8_t *w, unsigned wlen)
 }
 
 /* sec_ts_wait_for_ready(SEC_TS_ACK_BOOT_COMPLETE): the IC posts an INFO
- * event (eid 2, status id 0) when its firmware is up. Reads and discards
- * whatever else is queued. */
+ * event (stype 2, status id 0) when its firmware is up. Reads and discards
+ * whatever else is queued, like the stock loop. The previous version tested
+ * !s8ts_cmd_read(...), so it only looked at the buffer when the read FAILED:
+ * the boot-complete event was never consumed, stayed queued, and the worker
+ * re-read it. */
 static bool
 s8ts_wait_boot_complete(void)
 {
 	uint8_t ev[8];
-	for (unsigned i = 0; i < 40; i++) {
-		if (!s8ts_cmd_read(S8TS_READ_ONE_EVENT, ev, 8) && ev[0]) {
-			if (((ev[0] >> 2) & 0xf) == 2 && ev[1] == 0) {
-				printf("S8 TOUCH: boot complete event after %u polls\n", i + 1);
+	for (unsigned retry = 0; retry < 100; retry++) {
+		if (s8ts_cmd_read(S8TS_READ_ONE_EVENT, ev, 8) && ev[0]) {
+			if ((ev[0] & 3u) == S8TS_EVENT_STATUS &&
+			    ((ev[0] >> 2) & 0xfu) == S8TS_EVENT_STATUS_INFO &&
+			    ev[1] == S8TS_ACK_BOOT_COMPLETE) {
+				printf("S8 TOUCH: boot complete event after %u reads\n", retry + 1);
 				return true;
 			}
 		}
-		s8ts_wait(10);
+		s8ts_wait(20);
 	}
 	return false;
 }
@@ -244,6 +293,94 @@ s8ts_probe_ic(unsigned errors)
 	}
 }
 
+/* Wedge forensics and bus-level recovery.
+ *
+ * Ring sweetlog-tsdiag.txt (2026-10-23 06:4x): after ~3 min of use every
+ * transfer to the IC fails in the WRITE phase ("stage write-done") with
+ * INT_STATUS == 0x0 - not even the abort/no-ack/no-device/timeout bits - and
+ * the IC cannot be addressed at all, so even its own reset command fails:
+ *   S8 TOUCH: recovery: y661 soft reset 0x42 failed
+ * The IC-side ladder can never help then. What can look like that is the
+ * controller or its clock being gone (iOS gating a USI09 clock or the GPE3
+ * pads re-muxed); those are exactly the registers the loader sets up, so dump
+ * them, then put the loader's values back and re-init the controller. Reads
+ * only in the dump: CMU and pin blocks are always-on. */
+static bool
+s8ts_bus_maps_ok(void)
+{
+	return s8ts_cmu && s8ts_cmutop && s8ts_sysreg && s8ts_gpe3;
+}
+
+static void
+s8ts_dump_wedge(unsigned errors)
+{
+	if (!s8ts_bus_maps_ok()) {
+		return;
+	}
+	printf("S8 TOUCH: wedge (%u): ctl %#x trail %#x int_en %#x int %#x fifo %#x\n",
+	    errors, a5touch_read(s8ts_i2c, 0x00), a5touch_read(s8ts_i2c, 0x08),
+	    a5touch_read(s8ts_i2c, 0x20), a5touch_read(s8ts_i2c, 0x24),
+	    a5touch_read(s8ts_i2c, 0x30));
+	printf("S8 TOUCH: wedge (%u): conf %#x auto %#x trans %#x timeout %#x addr %#x\n",
+	    errors, a5touch_read(s8ts_i2c, 0x40), a5touch_read(s8ts_i2c, 0x44),
+	    a5touch_read(s8ts_i2c, 0x50), a5touch_read(s8ts_i2c, 0x48),
+	    a5touch_read(s8ts_i2c, 0x70));
+	printf("S8 TOUCH: wedge (%u): pclk %#x sclk %#x usermux %#x sysreg %#x\n",
+	    errors, a5touch_read(s8ts_cmu, S8TS_P1_USI09_PCLK),
+	    a5touch_read(s8ts_cmu, S8TS_P1_USI09_SCLK),
+	    a5touch_read(s8ts_cmu, S8TS_P1_USI09_USER_MUX),
+	    a5touch_read(s8ts_sysreg, S8TS_SYSREG_USI09));
+	printf("S8 TOUCH: wedge (%u): topmux %#x div %#x gate %#x\n",
+	    errors, a5touch_read(s8ts_cmutop, S8TS_TOP_USI09_MUX),
+	    a5touch_read(s8ts_cmutop, S8TS_TOP_USI09_DIV),
+	    a5touch_read(s8ts_cmutop, S8TS_TOP_USI09_GATE));
+	printf("S8 TOUCH: wedge (%u): gpe3 con %#x dat %#x pud %#x gpa1 dat %#x\n",
+	    errors, a5touch_read(s8ts_gpe3, S8TS_GPE3_CON),
+	    a5touch_read(s8ts_gpe3, S8TS_GPE3_CON + 4),
+	    a5touch_read(s8ts_gpe3, S8TS_GPE3_CON + 8),
+	    a5touch_read(s8ts_alive, S8TS_GPA1_DAT));
+}
+
+/* Re-assert exactly what shim/dreamlte/touch_probe.c wrote, then reset the
+ * controller. Every write is an OR of the loader's bits or the loader's own
+ * value, so repeating it cannot gate anything off. */
+static void
+s8ts_bus_recover(void)
+{
+	if (!s8ts_cmu || !s8ts_sysreg || !s8ts_gpe3) {
+		return;
+	}
+	a5touch_write(s8ts_cmu, S8TS_P1_USI09_PCLK,
+	    a5touch_read(s8ts_cmu, S8TS_P1_USI09_PCLK) | S8TS_GATE_ON);
+	a5touch_write(s8ts_cmu, S8TS_P1_USI09_SCLK,
+	    a5touch_read(s8ts_cmu, S8TS_P1_USI09_SCLK) | S8TS_GATE_ON);
+	a5touch_write(s8ts_cmu, S8TS_P1_USI09_USER_MUX,
+	    a5touch_read(s8ts_cmu, S8TS_P1_USI09_USER_MUX) & ~(1u << 4));
+	a5touch_write(s8ts_sysreg, S8TS_SYSREG_USI09,
+	    (a5touch_read(s8ts_sysreg, S8TS_SYSREG_USI09) & ~0xfu) | S8TS_USI_V1_I2C0_1);
+	a5touch_write(s8ts_gpe3, S8TS_GPE3_CON,
+	    (a5touch_read(s8ts_gpe3, S8TS_GPE3_CON) & ~0xffu) | 0x22u);
+	a5touch_write(s8ts_gpe3, S8TS_GPE3_CON + 8,
+	    a5touch_read(s8ts_gpe3, S8TS_GPE3_CON + 8) & ~0xffu);
+	s8i2c_reset(s8ts_i2c);
+}
+
+/* sec_ts_locked_release_all_finger(): the IC drops its finger state on a
+ * reset or a queue overflow; anything we were holding stays down in iOS
+ * until we report the release. */
+static void
+s8ts_release_all(void)
+{
+	for (unsigned i = 0; i < S8TS_FINGERS; i++) {
+		if (s8ts_down[i]) {
+			s8ts_down[i] = false;
+			if (i < 5) {
+				sweet_hid_touch((int)i, 0, s8ts_x[i], s8ts_y[i]);
+			}
+		}
+	}
+}
+
 /* Samsung recovers a wedged IC by re-initialising it: sec_ts_reinit() after a
  * watchdog/ESD status event, sec_ts_reset_work() after repeated i2c errors,
  * both of which stop the device, power-cycle its rails and run
@@ -262,17 +399,7 @@ s8ts_recover(unsigned errors)
 	printf("S8 TOUCH: recovery attempt after %u failures\n", errors);
 	printf("S8 TOUCH: recovery: clear event stack %s\n",
 	    s8ts_cmd_write(clr, NULL, 0) ? "ok" : "failed");
-	/* The reset drops the IC's finger state; tell iOS about anything we
-	 * were holding or it stays stuck down (sec_ts_locked_release_all_finger).
-	 */
-	for (unsigned i = 0; i < S8TS_FINGERS; i++) {
-		if (s8ts_down[i]) {
-			s8ts_down[i] = false;
-			if (i < 5) {
-				sweet_hid_touch((int)i, 0, s8ts_x[i], s8ts_y[i]);
-			}
-		}
-	}
+	s8ts_release_all();
 	printf("S8 TOUCH: recovery: y661 soft reset 0x42 %s\n",
 	    s8ts_cmd_write(reset, NULL, 0) ? "ok" : "failed");
 	s8ts_wait(150);
@@ -302,19 +429,64 @@ s8ts_recover(unsigned errors)
 	}
 }
 
-/* sec_ts_read_event(): status/info events. An INFO event (stype 2, status id
- * 0) is posted when the IC's own watchdog has reset it; Samsung answers with
- * SENSE_ON and sec_ts_reinit(). We logged and dropped these before, which is
- * one way the IC can stay silent after a self-reset. */
+/* Throttled front door for the IC-side re-init: at most S8TS_MAX_RECOVERIES
+ * per boot, S8TS_RECOVER_COOLDOWN_MS apart. Without this, an event the IC
+ * repeats (or a boot-complete we fail to consume) turns the reset into a loop
+ * that keeps the IC from ever scanning. */
+static void
+s8ts_try_recover(const char *why)
+{
+	uint64_t now = mach_absolute_time();
+	if (s8ts_recoveries >= S8TS_MAX_RECOVERIES) {
+		printf("S8 TOUCH: %s: no re-init (%u/%u used this boot)\n",
+		    why, s8ts_recoveries, S8TS_MAX_RECOVERIES);
+		return;
+	}
+	if (now < s8ts_recover_deadline) {
+		printf("S8 TOUCH: %s: re-init too soon, skipping\n", why);
+		return;
+	}
+	s8ts_recoveries++;
+	clock_interval_to_deadline(S8TS_RECOVER_COOLDOWN_MS, NSEC_PER_MSEC,
+	    &s8ts_recover_deadline);
+	s8ts_recover(0);
+}
+
+/* sec_ts_read_event(): status events. Dispatch is ev[0] & 3 == 1; stype is
+ * bits 5:2 of ev[0], id and data_1 are ev[1] and ev[2]. Samsung's conditions
+ * (sec_ts.c:1033-1057):
+ *   INFO + SEC_TS_ACK_BOOT_COMPLETE + data_1 == 0x20 -> watchdog reset:
+ *       release fingers, SENSE_ON, sec_ts_reinit()
+ *   ERR  + SEC_TS_ERR_EVENT_QUEUE_FULL -> release fingers
+ *   ERR  + SEC_TS_ERR_EVENT_ESD -> schedule the reset work
+ * The previous version matched ANY INFO event with status id 0 and re-inited
+ * with no cap at all. */
 static void
 s8ts_status_event(const uint8_t *ev)
 {
-	unsigned stype = (ev[0] >> 2) & 0xf;
-	printf("S8 TOUCH: status event %02x %02x %02x %02x %02x %02x %02x %02x stype %u\n",
-	    ev[0], ev[1], ev[2], ev[3], ev[4], ev[5], ev[6], ev[7], stype);
-	if (stype == S8TS_EVENT_STATUS_INFO && ev[1] == 0) {
-		printf("S8 TOUCH: IC posted boot complete (watchdog reset?), re-enabling\n");
-		s8ts_recover(0);
+	unsigned stype = (ev[0] >> 2) & 0xfu;
+	if (s8ts_raw > 0 || s8ts_status_logged < 16) {
+		s8ts_status_logged++;
+		printf("S8 TOUCH: status event %02x %02x %02x %02x %02x %02x %02x %02x stype %u\n",
+		    ev[0], ev[1], ev[2], ev[3], ev[4], ev[5], ev[6], ev[7], stype);
+	}
+	if (stype == S8TS_EVENT_STATUS_ERR && ev[1] == S8TS_ERR_EVENT_QUEUE_FULL) {
+		printf("S8 TOUCH: IC event queue full, releasing fingers\n");
+		s8ts_release_all();
+		return;
+	}
+	if (stype == S8TS_EVENT_STATUS_ERR && ev[1] == S8TS_ERR_EVENT_ESD) {
+		printf("S8 TOUCH: ESD event, re-initialising the IC\n");
+		s8ts_release_all();
+		s8ts_try_recover("ESD");
+		return;
+	}
+	if (stype == S8TS_EVENT_STATUS_INFO && ev[1] == S8TS_ACK_BOOT_COMPLETE &&
+	    ev[2] == S8TS_WATCHDOG_DATA_1) {
+		printf("S8 TOUCH: IC watchdog reset, re-enabling\n");
+		s8ts_release_all();
+		(void)s8ts_cmd_write(S8TS_CMD_SENSE_ON, NULL, 0);
+		s8ts_try_recover("watchdog");
 	}
 }
 
@@ -415,12 +587,30 @@ s8ts_thread(void *arg, wait_result_t result)
 			if (errors >= 16 && !(errors & 31)) {
 				s8ts_probe_ic(errors);
 			}
-			/* A stuck event port that 0x62 does not clear is what the
-			 * stock driver answers with a re-init. Try it, but no
-			 * faster than every 64 failures (4-13 s at the observed
-			 * ~0.4 s/cost) so one attempt can take effect first. */
+			/* Which failure is it? A read-stage failure is the IC's
+			 * event engine; a WRITE-stage failure means the IC cannot
+			 * even be addressed, so an IC-side re-init is pointless
+			 * (2026-10-23: every recovery write failed the same way)
+			 * and the bus setup the loader did has to be re-checked. */
 			if (errors >= 64 && !(errors & 63)) {
-				s8ts_recover(errors);
+				if (s8i2c_diag_stage_code == S8I2C_STAGE_WRITE) {
+					bool dump = s8ts_bus_maps_ok() &&
+					    (s8ts_wedge_dumps < 2 || !(s8ts_wedge_dumps % 8));
+					if (dump) {
+						s8ts_dump_wedge(errors);
+					}
+					s8ts_bus_recover();
+					s8ts_wedge_dumps++;
+					if (dump) {
+						printf("S8 TOUCH: bus recover (%u): gpe3 con %#x gate %#x int %#x\n",
+						    errors, a5touch_read(s8ts_gpe3, S8TS_GPE3_CON),
+						    a5touch_read(s8ts_cmutop, S8TS_TOP_USI09_GATE),
+						    a5touch_read(s8ts_i2c, 0x24));
+					}
+					s8ts_probe_ic(errors);
+				} else {
+					s8ts_try_recover("i2c errors");
+				}
 			}
 			s8ts_wait(20);
 			continue;
@@ -457,9 +647,9 @@ s8ts_thread(void *arg, wait_result_t result)
 			if (!ev[0]) {
 				continue;
 			}
-			if ((ev[0] & 3) == 0) {
+			if ((ev[0] & 3u) == S8TS_EVENT_STATUS) {
 				s8ts_status_event(ev);  /* may re-init the IC */
-			} else {
+			} else if ((ev[0] & 3u) == S8TS_EVENT_COORDINATE) {
 				s8ts_report(ev);
 			}
 		}
@@ -600,6 +790,14 @@ dreamlte_touch_start(void)
 		printf("S8 TOUCH: MMIO mapping failed\n");
 		return;
 	}
+	/* Only needed by the wedge dump and the bus recovery; the driver runs
+	 * without them if the maps fail. */
+	s8ts_cmu = ml_io_map(S8TS_CMU_PERIC1_PA, 0x4000);
+	s8ts_cmutop = ml_io_map(S8TS_CMU_TOP_PA, 0x4000);
+	s8ts_sysreg = ml_io_map(S8TS_SYSREG_PA, 0x1000);
+	s8ts_gpe3 = ml_io_map(S8TS_GPE3_PA, 0x1000);
+	printf("S8 TOUCH: bus maps cmu %d top %d sysreg %d gpe3 %d\n",
+	    s8ts_cmu != 0, s8ts_cmutop != 0, s8ts_sysreg != 0, s8ts_gpe3 != 0);
 	s8i2c_reset(s8ts_i2c);
 
 	/* Boot status 0x20 = application firmware. A Note 8 (y661) resets
