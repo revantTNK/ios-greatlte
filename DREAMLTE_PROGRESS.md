@@ -715,6 +715,10 @@ touch does not. Hardware source: Samsung's `android_kernel_samsung_universal8895
   back the function/TS status/power mode and **always starts the event
   worker**. Patch 0124 regenerated from the local A5-patched tree
   (`/tmp/opencode/xnu-tree/xnu`, `git apply --check` clean).
+- **Worker-fix kernel built (CI `39946348198`, commit `be98f613`):** kernel
+  SHA-256 `546cc223...82c307`, `lse-scan` 1 (same `<K256>`). Boot image
+  `shim/dreamlte/out/greatlte-ts-worker-boot.img`, SHA-256
+  `c451d807...15ff0d1b`, 16 842 768 bytes, same args as the LPM-fix image.
 - **Tool note:** `tools/dreamlte/pull-sweetlog.sh` skips `b/4096-1025`
   blocks, but USERDATA here is 55 254 167 552 bytes (not a multiple of
   4096), and TWRP's 32-bit shell arithmetic overflowed to `-142726`. The
