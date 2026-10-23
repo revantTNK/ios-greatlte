@@ -276,8 +276,8 @@ void touch_probe(void (*kv_fn)(const char *, uint64_t), void (*out_fn)(const cha
 		kv("l34 off rc", (uint64_t)(uint32_t)pmic_write(0x5f, 0));
 		kv("l35 off rc", (uint64_t)(uint32_t)pmic_write(0x60, 0));
 		delay_ms(50);
-		kv("l34 on rc", (uint64_t)(uint32_t)pmic_write(0x5f, 0x40 | (1850000 - 700000) / 25000));
-		kv("l35 on rc", (uint64_t)(uint32_t)pmic_write(0x60, 0x40 | (3300000 - 1800000) / 25000));
+		kv("l34 on rc", (uint64_t)(uint32_t)pmic_write(0x5f, 0xc0 | (1850000 - 700000) / 25000));
+		kv("l35 on rc", (uint64_t)(uint32_t)pmic_write(0x60, 0xc0 | (3300000 - 1800000) / 25000));
 		delay_ms(100);
 		out("\n");
 	}
