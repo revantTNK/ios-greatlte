@@ -735,6 +735,10 @@ touch does not. Hardware source: Samsung's `android_kernel_samsung_universal8895
   Samsung's `sec_ts_read_event`: `left > MAX_EVENT_COUNT-1` (31) means
   overflow, so write `SEC_TS_CMD_CLEAR_EVENT_STACK` (`0x62`), wait 20 ms and
   drop the batch; a run of failed reads also retries the `0x62` clear.
+- **Overflow-fix kernel built (CI `39951699454`, commit `0a0356b`):** kernel
+  SHA-256 `5758423f...9ecbb27`, `lse-scan` 1. Boot image
+  `shim/dreamlte/out/greatlte-ts-overflow-boot.img`, SHA-256
+  `82db76be...a123e4fcec`, 16 842 768 bytes, same args as the worker image.
 - **Tool note:** `tools/dreamlte/pull-sweetlog.sh` skips `b/4096-1025`
   blocks, but USERDATA here is 55 254 167 552 bytes (not a multiple of
   4096), and TWRP's 32-bit shell arithmetic overflowed to `-142726`. The
