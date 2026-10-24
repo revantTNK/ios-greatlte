@@ -988,8 +988,9 @@ after the user force-rebooted). Two findings, one of them mine.
   back 17 MiB and `head -c 16844816` -> the same `336a2894…7cbf`. BOOT is now
   the busfix image; the phone was rebooted from TWRP into iOS.
 - **Next:** the first boot of this image panicked before `vnguard_policy_init()` -
-  root cause below, fix in `xnu/patches/0125-commpage-text-16k-leaf-align.patch`.
-  Once a kernel with 0125 is flashed and it reaches iOS, use the phone until touch
+  root cause below, fixed by `xnu/patches/0125-commpage-text-16k-leaf-align.patch`
+  and built as `greatlte-ts-cmpalign-boot.img` (`3a054fb5…fa09d`), **not yet
+  flashed**. Once it is flashed and reaches iOS, use the phone until touch
   wedges (~3-10 min), force TWRP (Vol Down + Power to reset, then Vol Up + Bixby
   + Power at once), pull the ring (`tools/dreamlte/pull-sweetlog.sh`), and read
   `bus maps`, the first `event read failed (N) stage … int …`, `wedge (N): …`,
@@ -1051,9 +1052,28 @@ after the user force-rebooted). Two findings, one of them mine.
   data/RO commpage VAs are still handled by the existing `while`.
   Verified with `git apply --check` against a pristine copy of upstream
   `osfmk/arm/pmap/pmap.c`.
-- **Status:** patch written and checked to apply, **not built and not tested on
-  the phone**. BOOT `sda7` still holds the panicking busfix image
-  (`336a2894…7cbf`).
+- **Fix built (2026-10-24):** commit `4d67bb66b`, CI run **40104283246**
+  (macOS-14, A5XELTE/DEVELOPMENT) **success**; kernel
+  `/tmp/ci-0125/xnu-kernel/kernel.development.a5xelte`, 17 112 856 bytes,
+  SHA-256 `00c65e6acaaf3fdd37fbe0208fb6e9c753e008e4ff485ed5417a64ffcb8e3741`
+  (matches its `SHA256SUMS`). LSE scan unchanged: 1 hit, `ldumaxah` in
+  `K256` (`__TEXT_EXEC,__hib_text`), the same single hit as the previously
+  booting kernels - not new.
+  Image `shim/dreamlte/out/greatlte-ts-cmpalign-boot.img`, 16 844 816 bytes,
+  SHA-256 `3a054fb5203c0b15f7bb4ea7101eaef0976eb544f728c1f23c7f595b745fa09d`,
+  built from `backup/BOOT.img` with `S8_DRAM_MIB=2048` and the exact busfix
+  cmdline (`cpus=4 … s8tsreset=1 s8tspause=40 s8tsprobe=20 s8tsdebug=8
+  s8tspoll=1 vm_compression_limit=262144`, `sweetfb_native=1`). Checks run on
+  the built image: payload header `virt_base 0xfffffff006000000`, `phys
+  0x880000000`, `mem 0x80000000`, 10 pieces, cmdline byte-identical in length
+  (355) and content; the ADT `dram-size` property is `0x80000000`; the exact
+  48-byte `__TEXT_EXEC` block from `_pmap_create_commpages` around the new
+  mask (`ldr w9,[_PAGE_SHIFT_CONST]; lsl w9,w20,w9; sub x19,x8,w9,sxtw; and
+  x25,x10,x19`) is present in the payload and in the image (offset `0x40cb08`
+  / `0x41db08`).
+- **Status:** fix built and verified inside the image, **not tested on the
+  phone**. BOOT `sda7` still holds the panicking busfix image
+  (`336a2894…7cbf`); flashing the new image needs the user's approval.
 
 ## Open work
 
@@ -1068,10 +1088,12 @@ after the user force-rebooted). Two findings, one of them mine.
    written to `sda7` and read back identical). **Its first boot panicked in
    `pmap_create_commpages()`** - a port-side 16K-VM-page/4K-leaf-table bug that
    only bites on ~3 of 4 boots; root cause, evidence and the fix
-   (`0125-commpage-text-16k-leaf-align.patch`, not yet built) are in the
-   "Busfix boot panicked" section above. Rebuild the image on top of 0125 before
-   the next touch test; a boot that draws an aligned leaf index would also work
-   but proves nothing about the fix. The next ring is the one that
+   (`0125-commpage-text-16k-leaf-align.patch`) are in the "Busfix boot
+   panicked" section above, and the fixed image
+   `greatlte-ts-cmpalign-boot.img` (`3a054fb5…fa09d`, CI 40104283246) is built
+   and verified but **not flashed yet**. Flash that one for the next touch
+   test; a boot of the old image that draws an aligned leaf index would also
+   work but proves nothing about the fix. The next ring is the one that
    matters: read `wedge (N): .. gpe3 con ..` / `bus recover (N): ..` - the
    controller, CMU and pin registers at the failure are what decide whether the
    bus setup or the IC is at fault. Lines to look for are listed at the end of
