@@ -1364,7 +1364,12 @@ TWRP's pmsg zone still held the dead kernel's console tail.
   the loader's own literals, not the payload.)
 - **Flash step (pending user approval):** BOOT `sda7` only, through TWRP,
   push to `/tmp/buskick.img` and `dd … bs=1048576 conv=fsync`, verify by
-  read-back of 16 861 200 bytes against `d4091780…6140`. After boot, the ring
+  read-back of 16 861 200 bytes against `d4091780…6140`. **Done 2026-10-25
+  01:48 +03** with the user's approval (phone `greatlte` in TWRP, serial
+  `988d…13230`): on-phone SHA-256 matched, the pre-flash `sda7` read was
+  `5bac7657…9dd52` (the sysreg image), `dd` 16+1 records, rc=0, `sync`, and
+  the 16 861 200-byte read-back hashed `d4091780…6140`, identical. **Boot
+  result not observed yet.** After boot, the ring
   should carry `S8 TOUCH: boot regs (0): …` at bring-up and, at a wedge,
   `bus kick: dat … , after dat …` plus `bus recover (N): … dat …`. `after
   dat` with bit 0 set (0x2/0x3) means the bus cleared and `s8ts_probe_ic()`
