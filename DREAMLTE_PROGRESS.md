@@ -1315,11 +1315,15 @@ TWRP's pmsg zone still held the dead kernel's console tail.
      `gpe3 dat` are logged, and the `bus recover` summary line now carries
      `dat`. (First version drove SDA as an output high during the clocks; that
      would fight a slave holding the line, so it was fixed before building.)
-  2. `S8I2C_WAIT_US` = 100 000 (was 20 000) for both the INT_STATUS wait and
-     the RX-FIFO wait. i2c-exynos5 waits up to 100 ms in hardware (TMOUT) and
-     Samsung's ICs stretch SCL while their event firmware is busy; aborting
-     such a transfer is what leaves the bus in the SDA-low state. Healthy
-     transfers leave the loop on the first status bit, so this costs nothing.
+  2. `S8I2C_WAIT_US` = 100 000 for the INT_STATUS wait (was 20 000).
+     i2c-exynos5 waits up to 100 ms in hardware (TMOUT) and Samsung's ICs
+     stretch SCL while their event firmware is busy; aborting such a transfer
+     is what leaves the bus in the SDA-low state. Healthy transfers leave the
+     loop on the first status bit, so this costs nothing. The RX-FIFO wait
+     keeps its 20 000 per byte (`S8I2C_RXFIFO_WAIT_US`): it spins with
+     `delay(1)`, only runs after a read has been queued, and every wedge so
+     far failed in the write phase, so 100 s per byte there would just turn a
+     wedge into a 13-minute stall before the recovery ladder moves.
   3. `s8ts_dump_wedge()` became `s8ts_dump_regs(tag, errors)` and is also
      called once at boot right after `s8i2c_reset()` as `boot regs (0)`, so a
      wedge dump can be compared field by field with a healthy one. Wedge
@@ -1327,8 +1331,8 @@ TWRP's pmsg zone still held the dead kernel's console tail.
 - **Tooling:** `tools/dreamlte/sync-patch.py` now keeps
   `xnu/patches/0124-dreamlte-s8.patch` byte-identical to
   `tools/dreamlte/dreamlte_touch.c` and validates every hunk's line counts;
-  the driver block is 957 lines and the hunk header is
-  `@@ -615,10 +616,970 @@`.
+  the driver block is 962 lines and the hunk header is
+  `@@ -615,10 +616,975 @@`.
 - **Next escalation if the kick does not raise SDA:** port the loader's PMIC
   LDO34/LDO35 touch-rail power cycle (`shim/dreamlte/pmic.c`) into XNU - the
   loader's own probe only succeeds after a rail power cycle, and XNU has no

@@ -29,13 +29,18 @@
 #define S8TS_FINGERS            10
 #define S8_I2C_CLKIN            26000000u
 #define S8_I2C_SCL_HZ           400000u
-/* Per-transfer wait for INT_STATUS, and per byte for the RX FIFO. This was
- * 20 ms. i2c-exynos5 waits up to 100 ms (TMOUT), and Samsung's touch ICs hold
- * SCL low while their event/firmware path is busy: the 20 ms version aborted
- * transfers the IC was still working on, and an abort is what leaves the bus
- * in the SDA-low state every wedge dump shows. Healthy transfers end the wait
- * on the first status bit, so the longer limit costs nothing. */
+/* Per-transfer wait for INT_STATUS. This was 20 ms. i2c-exynos5 waits up to
+ * 100 ms (TMOUT), and Samsung's touch ICs hold SCL low while their
+ * event/firmware path is busy: the 20 ms version aborted transfers the IC was
+ * still working on, and an abort is what leaves the bus in the SDA-low state
+ * every wedge dump shows. Healthy transfers end the wait on the first status
+ * bit, so the longer limit costs nothing.
+ * The RX-FIFO wait stays at 20 ms per byte: it only runs after a read cycle
+ * has been queued, the controller fills the FIFO in microseconds, and every
+ * wedge so far failed in the write phase - a 100 s per byte wait there would
+ * turn a wedge into a 13-minute stall and delay the recovery ladder. */
 #define S8I2C_WAIT_US           100000u
+#define S8I2C_RXFIFO_WAIT_US     20000u
 /* sec_ts command set (identical numbers in sec_ts_y661 and sec_ts) */
 #define S8TS_CMD_SENSE_ON       0x10
 #define S8TS_CMD_SET_FUNC       0x30
@@ -188,7 +193,7 @@ s8i2c_xfer(vm_offset_t bus, unsigned addr, const uint8_t *w, unsigned wlen,
 		a5touch_write(bus, 0x44, (1u << 16) | (1u << 17) | rlen | (1u << 31));
 		for (unsigned i = 0; i < rlen; i++) {
 			unsigned n = 0;
-			while ((a5touch_read(bus, 0x30) & (1u << 24)) && n++ < S8I2C_WAIT_US) {
+			while ((a5touch_read(bus, 0x30) & (1u << 24)) && n++ < S8I2C_RXFIFO_WAIT_US) {
 				delay(1);
 			}
 			if (a5touch_read(bus, 0x30) & (1u << 24)) {
