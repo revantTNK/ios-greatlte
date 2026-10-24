@@ -989,8 +989,8 @@ after the user force-rebooted). Two findings, one of them mine.
   the busfix image; the phone was rebooted from TWRP into iOS.
 - **Next:** the first boot of this image panicked before `vnguard_policy_init()` -
   root cause below, fixed by `xnu/patches/0125-commpage-text-16k-leaf-align.patch`
-  and built as `greatlte-ts-cmpalign-boot.img` (`3a054fb5…fa09d`), **not yet
-  flashed**. Once it is flashed and reaches iOS, use the phone until touch
+  and built+flashed as `greatlte-ts-cmpalign-boot.img` (`3a054fb5…fa09d`,
+  2026-10-24 18:25 +03, read back identical). Once it reaches iOS, use the phone until touch
   wedges (~3-10 min), force TWRP (Vol Down + Power to reset, then Vol Up + Bixby
   + Power at once), pull the ring (`tools/dreamlte/pull-sweetlog.sh`), and read
   `bus maps`, the first `event read failed (N) stage … int …`, `wedge (N): …`,
@@ -1071,9 +1071,16 @@ after the user force-rebooted). Two findings, one of them mine.
   mask (`ldr w9,[_PAGE_SHIFT_CONST]; lsl w9,w20,w9; sub x19,x8,w9,sxtw; and
   x25,x10,x19`) is present in the payload and in the image (offset `0x40cb08`
   / `0x41db08`).
-- **Status:** fix built and verified inside the image, **not tested on the
-  phone**. BOOT `sda7` still holds the panicking busfix image
-  (`336a2894…7cbf`); flashing the new image needs the user's approval.
+- **Flashed 2026-10-24 18:25 +03** with the user's approval: pushed to
+  `/tmp/cmpalign.img`, on-phone SHA-256 matched `3a054fb5…fa09d`, the old BOOT
+  read back as `336a2894…7cbf` (the busfix image) immediately before the write,
+  `dd if=/tmp/cmpalign.img of=/dev/block/sda7 bs=1048576 conv=fsync` rc=0
+  (16+1 records), `sync`, read back 17 MiB and `head -c 16844816` -> the same
+  `3a054fb5…fa09d`. Phone rebooted from TWRP into iOS.
+- **Status:** fix built, verified inside the image, flashed and read back
+  identical; **boot result not observed yet**. If this boot gets past
+  `A5XELTE AMFI: built-in interface registered` and reaches iOS, the commpage
+  panic is fixed. The touch-wedge ring is the next measurement.
 
 ## Open work
 
@@ -1090,10 +1097,10 @@ after the user force-rebooted). Two findings, one of them mine.
    only bites on ~3 of 4 boots; root cause, evidence and the fix
    (`0125-commpage-text-16k-leaf-align.patch`) are in the "Busfix boot
    panicked" section above, and the fixed image
-   `greatlte-ts-cmpalign-boot.img` (`3a054fb5…fa09d`, CI 40104283246) is built
-   and verified but **not flashed yet**. Flash that one for the next touch
-   test; a boot of the old image that draws an aligned leaf index would also
-   work but proves nothing about the fix. The next ring is the one that
+   `greatlte-ts-cmpalign-boot.img` (`3a054fb5…fa09d`, CI 40104283246) is built,
+   verified and **flashed 2026-10-24 18:25 +03** (read back identical); the
+   phone was rebooted into it and its boot result is not observed yet. The next
+   ring is the one that
    matters: read `wedge (N): .. gpe3 con ..` / `bus recover (N): ..` - the
    controller, CMU and pin registers at the failure are what decide whether the
    bus setup or the IC is at fault. Lines to look for are listed at the end of
