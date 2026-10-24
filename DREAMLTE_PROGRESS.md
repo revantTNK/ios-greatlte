@@ -1082,6 +1082,77 @@ after the user force-rebooted). Two findings, one of them mine.
   `A5XELTE AMFI: built-in interface registered` and reaches iOS, the commpage
   panic is fixed. The touch-wedge ring is the next measurement.
 
+### Cmpalign boot: iOS ran ~4 min, then hung and self-reset (2026-10-24 ~18:30)
+
+- **Observation (user report):** the `greatlte-ts-cmpalign-boot.img` boot
+  reaches iOS and is usable - "i can use the phone as it is until it hangs for
+  a bit and then it just reboots". The 0125 commpage fix did its job: this boot
+  got past `A5XELTE AMFI: built-in interface registered`, loaded `launchd` and
+  ran the iOS UI. **This removes the 1-in-4 commpage panic from the picture.**
+- **Observation (ring `logs/sweetlog-cmpalign.txt`, pulled in TWRP, 6 278
+  lines):** the boot is normal up to the UI: `exec launchd` (line 135),
+  `SWEET FB` present counters climbing (line 4444 `400 presents at 238 s`),
+  and touch HID events through line 4413 (`down id=0 x=978 y=196`). Then:
+  - line 4447: first `S8 TOUCH: event read failed (1) stage write-done byte 255
+    int 0x0`; failures 2..8 up to line 4705 - the same WRITE-stage wedge
+    signature as earlier boots (the IC is not addressable, INT_STATUS `0x0`);
+  - line 5676 / 5706: `probe (32): ts status read failed` / `id22 read failed`,
+    same signature - the error counter reached at least 32;
+  - between and after the wedge the kernel is still alive: `exec
+    xpcproxy/fairplayd.H2/bluetoothd` and other daemon lines continue;
+  - the ring tail is the `SWEET AKS: MobileSMS sel 17 ...` flood (3 782 lines
+    of that one line pattern; 4 979 `SWEET AKS` lines in total, interleaved
+    with all normal activity since boot - background noise, not an error);
+  - **no** `panic`, **no** `wedge (N): ...`, **no** `bus recover (N): ...`, **no**
+    `S8 AUTORESET` anywhere in the ring.
+- **Why the driver prints nothing after error 8:** verified in
+  `bsd/dev/a5xelte_touch.c` (0124) - the event-read failure line prints only at
+  `++errors <= 8 || !(errors & 255)` (errors 9..254 are silent), the `probe`
+  digest at `errors >= 16 && !(errors & 31)`, and the full wedge dump +
+  `s8ts_bus_recover()` only at `errors >= 64 && !(errors & 63)` and only when
+  the failing stage is WRITE. Each failing transfer costs ~20 ms (20 000 us
+  timeout loop with `delay(1)`) plus the controller reset, and the worker
+  sleeps 20 ms between failures. So at ~32 errors the driver had printed all it
+  was going to print before error 64, and the phone reset before the next 10 s
+  ring flush could capture more.
+- **Observation (pmsg `logs/pmsg-cmpalign.txt`, 3 059 bytes, pulled in the same
+  TWRP session):** only loader text, from the boot **after** the self-reset
+  (UFS probe, PMIC, ACPM, touch probe with `appmode=0x1`, first `ev st`
+  lines). There is **no `--- XNU console ---` marker**, i.e. no kernel console
+  text at all. The dying boot's panic/hang text is not recoverable from this
+  session: `dl_main` (`shim/dreamlte/loader.c`) resets the `prz/prz2/prz3`
+  headers and writes from offset 0 on every loader run, so the post-reset
+  loader boot erased it. (Contrast `logs/pmsg-panic.txt`, which does have the
+  marker and the `write_pte_fast` panic - that boot hung instead of resetting,
+  and TWRP was entered without the loader running again.)
+- **Guesses (unresolved, listed as such):** a hang-then-warm-reset is
+  consistent with (a) an XNU **panic**, because `s8_halt_restart()` (0124,
+  `pe_serial.c`) writes PMU SWRESET for the panic restart types instead of
+  halting; (b) the **Exynos hardware watchdog**, since nothing in the tree
+  arms, services or disables the WDTE/ACPM watchdog - the `SWEET WDT:` lines
+  are only the fake `IOWatchdog` shim (0040/0045, "accepts check-ins, never
+  fires"), and `wdt=-1 wdt_test=no_user_checkin` only touch XNU-internal
+  watchdogs; (c) an ACPM/PMIC reset event. Nothing in hand distinguishes them
+  yet.
+- **Also open:** whether the touch WRITE-stage wedge is the cause of the reset,
+  a fellow symptom of a wider bus/clock failure, or its own problem. The onset
+  (238 s) is close to the reset, but the ring shows the kernel continuing to
+  schedule daemons after it. The `MobileSMS` AKS spin started long before the
+  wedge and runs throughout, so it is not the trigger either.
+- **Next measurement planned - get the dying boot's console text.** Two routes,
+  both needing the phone:
+  1. **No flash:** reproduce the hang and, at the moment it hangs / as it
+     resets, hold **Vol Up + Bixby + Power** so S-Boot enters TWRP instead of
+     BOOT `sda7`. The dreamlte loader then never runs and this TWRP's pmsg zone
+     should still hold the dying kernel's console tail (panic text, or the last
+     line before the hang).
+  2. **Loader change (if route 1 misses):** make the loader keep the previous
+     boot's text in the small pmsg zone instead of clearing it - continue after
+     the existing content the way `klog_init()` does, and leave the header
+     alone when the zone is already full. The loader builds locally
+     (`shim/dreamlte/build.sh`, aarch64-linux-gnu-gcc) and the kernel payload is
+     unchanged, so this needs no CI run; it does need a BOOT `sda7` flash.
+
 ## Open work
 
 1. Note 8 (greatlte) touch: **works in iOS, then wedges after a few minutes of
@@ -1098,14 +1169,21 @@ after the user force-rebooted). Two findings, one of them mine.
    (`0125-commpage-text-16k-leaf-align.patch`) are in the "Busfix boot
    panicked" section above, and the fixed image
    `greatlte-ts-cmpalign-boot.img` (`3a054fb5…fa09d`, CI 40104283246) is built,
-   verified and **flashed 2026-10-24 18:25 +03** (read back identical); the
-   phone was rebooted into it and its boot result is not observed yet. The next
-   ring is the one that
-   matters: read `wedge (N): .. gpe3 con ..` / `bus recover (N): ..` - the
-   controller, CMU and pin registers at the failure are what decide whether the
-   bus setup or the IC is at fault. Lines to look for are listed at the end of
-   the section above. Note that `logs/sweetlog-busfix.txt` predates the flash
-   (it is an old-kernel boot; see the correction above).
+   verified and **flashed 2026-10-24 18:25 +03** (read back identical).
+   **Boot result now observed (2026-10-24 ~18:30):** this image boots into iOS
+   and is usable for ~4 minutes; then it hangs briefly and **self-resets**.
+   The ring (`logs/sweetlog-cmpalign.txt`) shows the WRITE-stage wedge starting
+   at 238 s and reaching ~32 errors, the kernel still scheduling daemons, and
+   **no** `wedge (N)` / `bus recover (N)` dump (that needs error 64). pmsg holds
+   only the post-reset loader text, so the cause of the reset is not captured
+   yet - details, evidence and the two capture routes are in the "Cmpalign boot"
+   section above. **Next step: capture the dying boot's console text** (enter
+   TWRP straight from the hang, or flash a loader that preserves pmsg), then
+   read `wedge (N): .. gpe3 con ..` / `bus recover (N): ..` - the controller,
+   CMU and pin registers at the failure are what decide whether the bus setup or
+   the IC is at fault. Lines to look for are listed at the end of the section
+   above. Note that `logs/sweetlog-busfix.txt` predates the flash (it is an
+   old-kernel boot; see the correction above).
    The 2 GiB RAM question is closed: `greatlte-ts-overflow-2g-cmp-boot.img`
    (`8b2a9dd5...8adccded`, `vm_compression_limit=262144`) boots and shows 2 GiB
    on the phone; the 1 GiB fallback is
