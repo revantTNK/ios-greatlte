@@ -1338,6 +1338,38 @@ TWRP's pmsg zone still held the dead kernel's console tail.
   loader's own probe only succeeds after a rail power cycle, and XNU has no
   S2MPS17/SPEY driver to repeat it except via the pinctrl/PMIC registers the
   0124 patch already maps.
+- **Built and verified (2026-10-25), not yet booted:** commits `a9b7e9aa8`,
+  `72fffb685`, `aa38e7b91`; CI run **40139011852** (macOS-14,
+  A5XELTE/DEVELOPMENT) **success**; kernel
+  `/tmp/ci-0127/xnu-kernel/kernel.development.a5xelte`, 17 129 272 bytes,
+  SHA-256 `213fe0999c992d009a1563f682f97ae7aa32b92558b0a1086367a22fe4ac0e6d`
+  (matches its `SHA256SUMS`); LSE scan unchanged (1 hit, `K256`). Two earlier
+  runs of the same change were **cancelled before finishing** because review
+  found (40138293344) the kick driving SDA as an output high and
+  (40138774213) a 100 s-per-byte RX-FIFO wait; neither produced an artifact.
+  Image `shim/dreamlte/out/greatlte-ts-buskick-boot.img`, **16 861 200
+  bytes**, SHA-256
+  `d409178060d60882c47f988135b1b638bfbbc3eaf981e51b820269c1d12a6140`, built
+  from `backup/BOOT.img` with `S8_DRAM_MIB=2048` and the byte-identical
+  355-byte cmpalign cmdline (recovered from the previous payload:
+  `debug=0xc serial=3 cpus=4 … s8tspoll=1 vm_compression_limit=262144`,
+  `sweetfb_native=1`). Checks on it: payload `SWEETXNU` v1, 10 pieces,
+  `virt_base 0xfffffff006000000`, entry `0xfffffff007428488` (same as the
+  sysreg kernel), `phys 0x880000000`, `mem 0x80000000`, payload at file
+  offset `0x11000` and **byte-identical** to `payload.bin`
+  (16 550 176 bytes); the ADT equals a fresh `--canvas 1440x2960
+  --dram-mib 2048` generation except the 64-byte `os.urandom(64)` seed, and
+  differs from `--dram-mib 512`, so 2 GiB is set; `bus kick: dat` is present
+  in the payload's strings. (Two other `SWEETXNU` hits at 0x7778/0x7798 are
+  the loader's own literals, not the payload.)
+- **Flash step (pending user approval):** BOOT `sda7` only, through TWRP,
+  push to `/tmp/buskick.img` and `dd … bs=1048576 conv=fsync`, verify by
+  read-back of 16 861 200 bytes against `d4091780…6140`. After boot, the ring
+  should carry `S8 TOUCH: boot regs (0): …` at bring-up and, at a wedge,
+  `bus kick: dat … , after dat …` plus `bus recover (N): … dat …`. `after
+  dat` with bit 0 set (0x2/0x3) means the bus cleared and `s8ts_probe_ic()`
+  succeeding means touch is back; bit 0 clear means something still holds
+  SDA and the PMIC rail cycle is next.
 
 ## Open work
 
