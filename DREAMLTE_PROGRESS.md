@@ -1254,8 +1254,14 @@ TWRP's pmsg zone still held the dead kernel's console tail.
   `phys 0x880000000`, `mem 0x80000000`; the ADT's `dram-size` is `0x80000000`;
   the patched instruction bytes `6b1d40b9` are at payload offset `0x48bb38` and
   at the same place inside the image. (A first build without `S8_DRAM_MIB=2048`
-  produced a 512 MiB payload and was discarded.) **Flash to BOOT `sda7` needs
-  the user's approval.**
+  produced a 512 MiB payload and was discarded.)
+- **Flashed 2026-10-25 00:37 +03** with the user's approval, phone in TWRP
+  (`greatlte`, serial `988d…13230`): pushed to `/tmp/sysreg.img`, on-phone
+  SHA-256 `cfeb0c6c…f171`; the pre-flash BOOT read back as `3a054fb5…fa09d`
+  (the cmpalign image); `dd if=/tmp/sysreg.img of=/dev/block/sda7
+  bs=1048576 conv=fsync` rc=0 (16+1 records), `sync`; read back 17 MiB and
+  `head -c 16844816` -> `cfeb0c6c…f171`, identical. **Boot result not observed
+  yet.**
 
 ## Open work
 
