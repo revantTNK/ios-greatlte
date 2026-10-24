@@ -1238,6 +1238,24 @@ TWRP's pmsg zone still held the dead kernel's console tail.
   The register dump meant to answer that is exactly what panicked on every
   wedged boot; with the address fixed the dump completes and
   `s8ts_bus_recover()` runs for the first time.
+- **Built and verified (2026-10-25), not yet booted:** commit `6241c08ad`, CI
+  run **40133743133** (macOS-14, A5XELTE/DEVELOPMENT) **success**; kernel
+  `/tmp/ci-0126/kernel.development.a5xelte`, 17 112 856 bytes, SHA-256
+  `fa4dfa0aabfb5aa69edc342c44e798ee8508bccfc40999e9d421c17c8148604f` (matches
+  its `SHA256SUMS`); LSE scan unchanged (1 hit, the same `K256` `ldumaxah`).
+  The fixed instruction sits at the *same* VA as the faulting one,
+  `0xfffffff00748f748`: `b9401d6b ldr w11, [x11, #0x1c]` (was `b9501d6b` with
+  `#0x101c`), so the code layout is otherwise identical. Image
+  `shim/dreamlte/out/greatlte-ts-sysreg-boot.img`, 16 844 816 bytes, SHA-256
+  `cfeb0c6c6589371eb6998ecc91ae07924c8574de04b9af75131332c9443ef171`, built from
+  `backup/BOOT.img` with `S8_DRAM_MIB=2048` and the cmpalign cmdline
+  byte-identical (355 bytes). Checks on the image: payload `SWEETXNU` v1,
+  10 pieces, `virt_base 0xfffffff006000000`, entry `0xfffffff007428488`,
+  `phys 0x880000000`, `mem 0x80000000`; the ADT's `dram-size` is `0x80000000`;
+  the patched instruction bytes `6b1d40b9` are at payload offset `0x48bb38` and
+  at the same place inside the image. (A first build without `S8_DRAM_MIB=2048`
+  produced a 512 MiB payload and was discarded.) **Flash to BOOT `sda7` needs
+  the user's approval.**
 
 ## Open work
 
@@ -1264,11 +1282,13 @@ TWRP's pmsg zone still held the dead kernel's console tail.
    synchronous external abort, and warm-reset; `s8ts_bus_recover()` therefore
    never ran on any wedged boot. Full evidence and the address fix are in "The
    cmpalign self-reset is a kernel panic in the touch wedge dump" above.
-   **Next step: build the fixed kernel, make a BOOT image and flash it (needs
-   user approval), then boot and read the `wedge (N): ..` / `bus recover (N): ..`
-   lines in the ring or pmsg** - the controller, CMU, SYSREG and pin registers
-   at the failure are what decide whether the bus setup or the IC is at fault,
-   and the recovery now actually runs. Note that `logs/sweetlog-busfix.txt`
+   The fixed kernel and image are **built and verified** (CI 40133743133,
+   `greatlte-ts-sysreg-boot.img`, `cfeb0c6c…f171`) - see the end of that
+   section. **Next step: flash it to BOOT `sda7` (needs user approval), boot,
+   then read the `wedge (N): ..` / `bus recover (N): ..` lines in the ring or
+   pmsg** - the controller, CMU, SYSREG and pin registers at the failure are
+   what decide whether the bus setup or the IC is at fault, and the recovery now
+   actually runs. Note that `logs/sweetlog-busfix.txt`
    predates the flash (it is an old-kernel boot; see the correction above).
    The 2 GiB RAM question is closed: `greatlte-ts-overflow-2g-cmp-boot.img`
    (`8b2a9dd5...8adccded`, `vm_compression_limit=262144`) boots and shows 2 GiB
