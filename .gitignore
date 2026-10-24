@@ -17,3 +17,5 @@ logs/
 # Samsung ACPM DVFS plugin blob (tools/dreamlte/fetch-acpm-fw.sh)
 shim/dreamlte/firmware/
 node_modules/
+# Claude Code local config
+.claude/
