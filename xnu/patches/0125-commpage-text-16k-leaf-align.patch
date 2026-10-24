@@ -1,0 +1,29 @@
+diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
+index fc2096f..243364b 100644
+--- a/osfmk/arm/pmap/pmap.c
++++ b/osfmk/arm/pmap/pmap.c
+@@ -10888,16 +10888,24 @@ pmap_create_commpages(vm_map_address_t *kernel_data_addr, vm_map_address_t *kern
+
+ 	do {
+ 		int text_leaf_index = random() % num_ptes;
+
+ 		// Generate a VA for the commpage text with the same root and twig index as data
+ 		// comm page, but with new leaf index we've just generated.
+ 		commpage_text_va = (_COMM_PAGE64_BASE_ADDRESS & ~pt_attr_leaf_index_mask(pt_attr));
+ 		commpage_text_va |= (text_leaf_index << pt_attr_leaf_shift(pt_attr));
++		/*
++		 * write_pte_fast() writes every leaf entry of a VM page at once and
++		 * panics unless the first one is VM-page aligned. When a VM page spans
++		 * multiple page table entries (16K VM pages over 4K page tables), round
++		 * the random text address down to a VM page boundary. This is a no-op
++		 * when the leaf page size matches PAGE_SIZE.
++		 */
++		commpage_text_va &= ~((vm_map_address_t)PAGE_SIZE - 1);
+ 	} while ((commpage_text_va == _COMM_PAGE64_BASE_ADDRESS) || (commpage_text_va == _COMM_PAGE64_RO_ADDRESS)); // Try again if we collide (should be unlikely)
+
+ 	// Assert that this is empty
+ 	__assert_only pt_entry_t *ptep = pmap_pte(commpage_pmap_default, commpage_text_va);
+ 	assert(ptep != PT_ENTRY_NULL);
+ 	assert(*ptep == ARM_TTE_EMPTY);
+
+ 	// At this point, we've found the address we want to insert our comm page at

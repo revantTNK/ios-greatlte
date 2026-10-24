@@ -962,6 +962,99 @@ after the user force-rebooted). Two findings, one of them mine.
     sysreg 1 gpe3 1`, `S8 TOUCH: boot complete event after N reads`, and on a
     wedge `wedge (N): ctl .. gpe3 con ..` plus `bus recover (N): ..`.
 
+### Busfix image built, verified and flashed (2026-10-24)
+
+- **The build exists and is correct:** `shim/dreamlte/out/greatlte-ts-busfix-boot.img`,
+  16 844 816 bytes, SHA-256 `336a289481f45857f7a8c5fb5a71656794c5d08cfcb6e3f691a6f92e9bfd7cbf`,
+  built 2026-10-23 19:56 (+03). It embeds the CI kernel of run **39989588696**
+  (`2abbb2b16bb9cae8c92b7785157f5cb3f6cd9c34c601a19918f3f9053d9c775a`,
+  17 112 856 bytes). Verified by extracting the `SWEETXNU` payload and comparing
+  all 10 file-backed segments byte-for-byte against the downloaded CI artifact
+  with `mkpayload.py`'s chained-fixup walk (all match). Boot args are unchanged
+  from the 2 GiB image: `cpus=4 … s8tsreset=1 s8tspause=40 s8tsprobe=20
+  s8tsdebug=8 s8tspoll=1 vm_compression_limit=262144`.
+- **Correction: `logs/sweetlog-busfix.txt` is not a busfix boot.** Read in TWRP
+  before flashing, BOOT `sda7` still held `greatlte-ts-overflow-2g-cmp-boot.img`
+  (first 16 MiB of the partition matched its SHA-256 `32475d66…` exactly). The
+  ring confirms the old kernel: `event read failed (1)` has **no**
+  `stage … byte … int …` suffix, there is no `bus maps` line, and only 8
+  failure lines exist (the old print rule). It is a second boot of the 2g-cmp
+  image (uptime 202 s, `s8rtc=1792775514`) and was renamed locally to
+  `logs/sweetlog-2g-cmp-2.txt`. It does confirm the wedge reproduces after
+  ~180 s of use: 40+ HID touches reach SpringBoard, then the IC stops answering.
+- **Flashed 2026-10-24 10:55 +03** with the user's approval: pushed to
+  `/tmp/busfix.img`, on-phone SHA-256 matched, `dd if=/tmp/busfix.img
+  of=/dev/block/sda7 bs=1048576 conv=fsync` rc=0 (16+1 records), `sync`, read
+  back 17 MiB and `head -c 16844816` -> the same `336a2894…7cbf`. BOOT is now
+  the busfix image; the phone was rebooted from TWRP into iOS.
+- **Next:** the first boot of this image panicked before `vnguard_policy_init()` -
+  root cause below, fix in `xnu/patches/0125-commpage-text-16k-leaf-align.patch`.
+  Once a kernel with 0125 is flashed and it reaches iOS, use the phone until touch
+  wedges (~3-10 min), force TWRP (Vol Down + Power to reset, then Vol Up + Bixby
+  + Power at once), pull the ring (`tools/dreamlte/pull-sweetlog.sh`), and read
+  `bus maps`, the first `event read failed (N) stage … int …`, `wedge (N): …`,
+  `bus recover (N): …`.
+
+### Busfix boot panicked: commpage text leaf index is not 16K-aligned (2026-10-24)
+
+- **Observation:** the first boot of `greatlte-ts-busfix-boot.img` did not reach
+  iOS. The ring (`logs/pmsg-panic.txt`, pulled in TWRP) ends with
+  `panic(cpu 0 caller 0xfffffff00740982c): write_pte_fast: PTE write is
+  unaligned, ptep=0xfffffff00a85b150, pte=0x420000883654ec3 @pmap.c:623`
+  after `A5XELTE AMFI: built-in interface registered (XML entitlements)` and
+  before any `vnguard_policy_init` line. Boot args have no `s8autoreset`, so the
+  panic hung the phone and it was reset into TWRP by hand.
+- **Where the panic sits:** `kernel_bootstrap_thread()` logs that AMFI line from
+  `kernel_startup_initialize_upto(STARTUP_SUB_EARLY_BOOT)`, then runs
+  `vm_commpage_init()`, `vm_commpage_text_init()`, `mac_policy_initmach()`,
+  `vnguard_policy_init()` - so the hole in the ring is the commpage init.
+- **Decoded panic values:** `ptep=0xfffffff00a85b150` is in the 4K L3 table at
+  `0xfffffff00a85b000` (pa `0x88485b000` under
+  `phystokv = 0xfffffff006000000 + pa - 0x880000000`), leaf index
+  `0x150 / 8 = 42`, and `42 & 3 = 2`, so the PTE write starts 8 KiB into a 16 KiB
+  VM page. `pte=0x420000883654ec3` is a valid leaf, AF, SH=outer, AP=RORO,
+  NG set, PXN set, NX clear (user read-execute), WIRED (bit 58),
+  pa `0x883654000` (an early free-list page, 16K-aligned). That is the commpage
+  text page of the non-kernel `commpage_pmap_default`.
+- **Root cause (port-side, latent):** `pmap_create_commpages()`
+  (`osfmk/arm/pmap/pmap.c`, `do { int text_leaf_index = random() % num_ptes; …
+  } while (…)`) places the commpage text at a **random leaf index** into a
+  512-entry **4 KiB** leaf table (`num_ptes = pt_attr_leaf_size >> PTE_SHIFT`)
+  and enters it with `VM_PROT_READ | VM_PROT_EXECUTE`, wired, at the top of
+  `vm_commpage_init()`. On genuine 16K hardware the leaf table is 16K-granular
+  and every index is fine; this port runs **16K VM pages over 4K page tables**
+  (`TEST_PAGE_RATIO_4`), so `write_pte_fast()` writes four consecutive PTEs and
+  panics whenever `index % 4 != 0`. Three independent checks agree:
+  1. source: `pmap_create_commpages()` is the only `random()`-driven
+     `pmap_enter_*` in that window, with exactly READ|EXECUTE + wired;
+  2. machine code in `xnu/out/kernel.development.a5xelte`
+     (`_pmap_create_commpages` at `0xfffffff0074105d0`): `mov x1, #0xfffffc000`
+     (`_COMM_PAGE64_BASE_ADDRESS`), `bl _random`, `lsl w8, w0, #12`,
+     `orr x25, x8, #0xfffe00000` (2 MiB L3 base), `and w8, w26, #0x1ff`
+     (512-entry table), `mov w3, #0x5` (R|X), `w6=1` (wired),
+     `bl _pmap_enter_options_addr` at `0xfffffff0074107b4`;
+  3. arithmetic: index 42 -> VA `0xfffe2a000`, `ptep` offset `0x150` ->
+     `0xfffffff00a85b150`, exactly the logged value.
+- **This is not the touch/busfix change:** commit `3cdd1421e` only touched
+  `bsd/dev/a5xelte_touch.c` (and the regenerated `0124` touch hunks), and
+  `write_pte_fast`/commpage code appears nowhere else in the project history.
+  Because the leaf index comes from `random()`, whether a boot survives is
+  **per-boot luck**: ~1 in 4 draws an aligned index. That fits the earlier
+  near-identical kernels that booted (`logs/sweetlog-2g-cmp-2.txt`, 202 s
+  uptime) and the 2g-cmp image that was in `sda7` before this flash.
+- **Fix prepared:** `xnu/patches/0125-commpage-text-16k-leaf-align.patch` masks
+  the chosen text VA down to a `PAGE_SIZE` boundary inside the retry loop
+  (`commpage_text_va &= ~((vm_map_address_t)PAGE_SIZE - 1);`). The L3 base is
+  already 2 MiB aligned, so this keeps the same twig, makes the four-PTE write
+  start on a 16 KiB boundary, maps exactly one 16 KiB VM page to the 16 KiB
+  `text_pa`, and is a no-op where leaf size == `PAGE_SIZE`. Collisions with the
+  data/RO commpage VAs are still handled by the existing `while`.
+  Verified with `git apply --check` against a pristine copy of upstream
+  `osfmk/arm/pmap/pmap.c`.
+- **Status:** patch written and checked to apply, **not built and not tested on
+  the phone**. BOOT `sda7` still holds the panicking busfix image
+  (`336a2894…7cbf`).
+
 ## Open work
 
 1. Note 8 (greatlte) touch: **works in iOS, then wedges after a few minutes of
@@ -970,11 +1063,20 @@ after the user force-rebooted). Two findings, one of them mine.
    recovery ladder cannot help. The diagnostic image was measured, its
    coordinate-event dispatch bug was fixed, and BOOT is back on the pre-diagnostic
    image `greatlte-ts-overflow-2g-cmp-boot.img` (`8b2a9dd5...adccded`, verified by
-   read-back). **Next: flash the build from `3cdd1421e`** (run 39989588696) and
-   read the ring for `wedge (N): .. gpe3 con ..` / `bus recover (N): ..` - the
+   read-back). **The `3cdd1421e` image is now flashed** (2026-10-24:
+   `greatlte-ts-busfix-boot.img`, `336a2894...7cbf`, kernel `2abbb2b1...c775a`,
+   written to `sda7` and read back identical). **Its first boot panicked in
+   `pmap_create_commpages()`** - a port-side 16K-VM-page/4K-leaf-table bug that
+   only bites on ~3 of 4 boots; root cause, evidence and the fix
+   (`0125-commpage-text-16k-leaf-align.patch`, not yet built) are in the
+   "Busfix boot panicked" section above. Rebuild the image on top of 0125 before
+   the next touch test; a boot that draws an aligned leaf index would also work
+   but proves nothing about the fix. The next ring is the one that
+   matters: read `wedge (N): .. gpe3 con ..` / `bus recover (N): ..` - the
    controller, CMU and pin registers at the failure are what decide whether the
    bus setup or the IC is at fault. Lines to look for are listed at the end of
-   the section above.
+   the section above. Note that `logs/sweetlog-busfix.txt` predates the flash
+   (it is an old-kernel boot; see the correction above).
    The 2 GiB RAM question is closed: `greatlte-ts-overflow-2g-cmp-boot.img`
    (`8b2a9dd5...8adccded`, `vm_compression_limit=262144`) boots and shows 2 GiB
    on the phone; the 1 GiB fallback is
