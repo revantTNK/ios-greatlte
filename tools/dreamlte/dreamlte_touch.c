@@ -29,6 +29,13 @@
 #define S8TS_FINGERS            10
 #define S8_I2C_CLKIN            26000000u
 #define S8_I2C_SCL_HZ           400000u
+/* Per-transfer wait for INT_STATUS, and per byte for the RX FIFO. This was
+ * 20 ms. i2c-exynos5 waits up to 100 ms (TMOUT), and Samsung's touch ICs hold
+ * SCL low while their event/firmware path is busy: the 20 ms version aborted
+ * transfers the IC was still working on, and an abort is what leaves the bus
+ * in the SDA-low state every wedge dump shows. Healthy transfers end the wait
+ * on the first status bit, so the longer limit costs nothing. */
+#define S8I2C_WAIT_US           100000u
 /* sec_ts command set (identical numbers in sec_ts_y661 and sec_ts) */
 #define S8TS_CMD_SENSE_ON       0x10
 #define S8TS_CMD_SET_FUNC       0x30
@@ -139,7 +146,7 @@ s8i2c_reset(vm_offset_t bus)
 static bool
 s8i2c_wait_done(vm_offset_t bus)
 {
-	for (unsigned us = 0; us < 20000; us++) {
+	for (unsigned us = 0; us < S8I2C_WAIT_US; us++) {
 		uint32_t s = a5touch_read(bus, 0x24);
 		if (s & 0xf80u) {
 			a5touch_write(bus, 0x24, s);
@@ -181,7 +188,7 @@ s8i2c_xfer(vm_offset_t bus, unsigned addr, const uint8_t *w, unsigned wlen,
 		a5touch_write(bus, 0x44, (1u << 16) | (1u << 17) | rlen | (1u << 31));
 		for (unsigned i = 0; i < rlen; i++) {
 			unsigned n = 0;
-			while ((a5touch_read(bus, 0x30) & (1u << 24)) && n++ < 20000) {
+			while ((a5touch_read(bus, 0x30) & (1u << 24)) && n++ < S8I2C_WAIT_US) {
 				delay(1);
 			}
 			if (a5touch_read(bus, 0x30) & (1u << 24)) {
@@ -318,45 +325,91 @@ s8ts_bus_maps_ok(void)
 	return s8ts_cmu && s8ts_cmutop && s8ts_sysreg && s8ts_gpe3;
 }
 
+/* Same dump for the boot-time baseline ("boot regs", 0 errors, right after
+ * s8i2c_reset()) and for a wedge, so the two can be compared field by field.
+ * gpe3 dat bits 0/1 are SDA/SCL: at idle both are high; an SDA held low means
+ * no START can form, which is what an INT_STATUS of 0 after the aborted
+ * transfer looks like. */
 static void
-s8ts_dump_wedge(unsigned errors)
+s8ts_dump_regs(const char *tag, unsigned errors)
 {
 	if (!s8ts_bus_maps_ok()) {
 		return;
 	}
-	printf("S8 TOUCH: wedge (%u): ctl %#x trail %#x int_en %#x int %#x fifo %#x\n",
-	    errors, a5touch_read(s8ts_i2c, 0x00), a5touch_read(s8ts_i2c, 0x08),
+	printf("S8 TOUCH: %s (%u): ctl %#x trail %#x int_en %#x int %#x fifo %#x\n",
+	    tag, errors, a5touch_read(s8ts_i2c, 0x00), a5touch_read(s8ts_i2c, 0x08),
 	    a5touch_read(s8ts_i2c, 0x20), a5touch_read(s8ts_i2c, 0x24),
 	    a5touch_read(s8ts_i2c, 0x30));
-	printf("S8 TOUCH: wedge (%u): conf %#x auto %#x trans %#x timeout %#x addr %#x\n",
-	    errors, a5touch_read(s8ts_i2c, 0x40), a5touch_read(s8ts_i2c, 0x44),
+	printf("S8 TOUCH: %s (%u): conf %#x auto %#x trans %#x timeout %#x addr %#x\n",
+	    tag, errors, a5touch_read(s8ts_i2c, 0x40), a5touch_read(s8ts_i2c, 0x44),
 	    a5touch_read(s8ts_i2c, 0x50), a5touch_read(s8ts_i2c, 0x48),
 	    a5touch_read(s8ts_i2c, 0x70));
-	printf("S8 TOUCH: wedge (%u): pclk %#x sclk %#x usermux %#x sysreg %#x\n",
-	    errors, a5touch_read(s8ts_cmu, S8TS_P1_USI09_PCLK),
+	printf("S8 TOUCH: %s (%u): pclk %#x sclk %#x usermux %#x sysreg %#x\n",
+	    tag, errors, a5touch_read(s8ts_cmu, S8TS_P1_USI09_PCLK),
 	    a5touch_read(s8ts_cmu, S8TS_P1_USI09_SCLK),
 	    a5touch_read(s8ts_cmu, S8TS_P1_USI09_USER_MUX),
 	    a5touch_read(s8ts_sysreg, S8TS_SYSREG_USI09));
-	printf("S8 TOUCH: wedge (%u): topmux %#x div %#x gate %#x\n",
-	    errors, a5touch_read(s8ts_cmutop, S8TS_TOP_USI09_MUX),
+	printf("S8 TOUCH: %s (%u): topmux %#x div %#x gate %#x\n",
+	    tag, errors, a5touch_read(s8ts_cmutop, S8TS_TOP_USI09_MUX),
 	    a5touch_read(s8ts_cmutop, S8TS_TOP_USI09_DIV),
 	    a5touch_read(s8ts_cmutop, S8TS_TOP_USI09_GATE));
-	printf("S8 TOUCH: wedge (%u): gpe3 con %#x dat %#x pud %#x gpa1 dat %#x\n",
-	    errors, a5touch_read(s8ts_gpe3, S8TS_GPE3_CON),
+	printf("S8 TOUCH: %s (%u): gpe3 con %#x dat %#x pud %#x gpa1 dat %#x\n",
+	    tag, errors, a5touch_read(s8ts_gpe3, S8TS_GPE3_CON),
 	    a5touch_read(s8ts_gpe3, S8TS_GPE3_CON + 4),
 	    a5touch_read(s8ts_gpe3, S8TS_GPE3_CON + 8),
 	    a5touch_read(s8ts_alive, S8TS_GPA1_DAT));
 }
 
+/* Bit-bang a bus clear. If the IC is mid-byte (holding SDA low) or our own
+ * pad was left driving SDA low when the controller aborted, no START can ever
+ * complete and INT_STATUS stays 0 forever - the wedge. Exynos pin CON nibble 1
+ * is GPIO output, 0 is input, >= 2 is the peripheral function; SDA is gpe3-0
+ * and SCL gpe3-1 (shim/dreamlte/touch_probe.c). Drive both as GPIO, clock SCL
+ * nine times with SDA released so a slave finishes its byte, issue a STOP,
+ * then release the pads to input and read the levels back. GPxDAT has one bit
+ * per pad and pins 4-7 are GPIO outputs held high, so every DAT write keeps
+ * their latches (mask ~3). */
+static void
+s8ts_bus_kick(void)
+{
+	if (!s8ts_gpe3) {
+		return;
+	}
+	uint32_t con = a5touch_read(s8ts_gpe3, S8TS_GPE3_CON);
+	uint32_t dat = a5touch_read(s8ts_gpe3, S8TS_GPE3_CON + 4);
+
+	printf("S8 TOUCH: bus kick: dat %#x", dat);
+	a5touch_write(s8ts_gpe3, S8TS_GPE3_CON, (con & ~0xfu) | 0x11u);   /* both GPIO out */
+	a5touch_write(s8ts_gpe3, S8TS_GPE3_CON + 4, (dat & ~3u) | 3u);    /* both high */
+	delay(5);
+	for (unsigned i = 0; i < 9; i++) {
+		a5touch_write(s8ts_gpe3, S8TS_GPE3_CON + 4, (dat & ~3u) | 1u);   /* SCL low */
+		delay(5);
+		a5touch_write(s8ts_gpe3, S8TS_GPE3_CON + 4, (dat & ~3u) | 3u);   /* SCL high */
+		delay(5);
+	}
+	a5touch_write(s8ts_gpe3, S8TS_GPE3_CON + 4, (dat & ~3u) | 2u);    /* SDA low, SCL high */
+	delay(5);
+	a5touch_write(s8ts_gpe3, S8TS_GPE3_CON + 4, (dat & ~3u) | 3u);    /* STOP: SDA high */
+	delay(5);
+	a5touch_write(s8ts_gpe3, S8TS_GPE3_CON, con & ~0xfu);             /* release to input */
+	delay(10);
+	printf(", after dat %#x\n", a5touch_read(s8ts_gpe3, S8TS_GPE3_CON + 4));
+	a5touch_write(s8ts_gpe3, S8TS_GPE3_CON, con);                     /* back to I2C */
+}
+
 /* Re-assert exactly what shim/dreamlte/touch_probe.c wrote, then reset the
  * controller. Every write is an OR of the loader's bits or the loader's own
- * value, so repeating it cannot gate anything off. */
+ * value, so repeating it cannot gate anything off. The GPIO kick comes first:
+ * rewriting CON to the value it already holds cannot release a pad that is
+ * driving SDA low. */
 static void
 s8ts_bus_recover(void)
 {
 	if (!s8ts_cmu || !s8ts_sysreg || !s8ts_gpe3) {
 		return;
 	}
+	s8ts_bus_kick();
 	a5touch_write(s8ts_cmu, S8TS_P1_USI09_PCLK,
 	    a5touch_read(s8ts_cmu, S8TS_P1_USI09_PCLK) | S8TS_GATE_ON);
 	a5touch_write(s8ts_cmu, S8TS_P1_USI09_SCLK,
@@ -604,13 +657,14 @@ s8ts_thread(void *arg, wait_result_t result)
 					bool dump = s8ts_bus_maps_ok() &&
 					    (s8ts_wedge_dumps < 2 || !(s8ts_wedge_dumps % 8));
 					if (dump) {
-						s8ts_dump_wedge(errors);
+						s8ts_dump_regs("wedge", errors);
 					}
 					s8ts_bus_recover();
 					s8ts_wedge_dumps++;
 					if (dump) {
-						printf("S8 TOUCH: bus recover (%u): gpe3 con %#x gate %#x int %#x\n",
+						printf("S8 TOUCH: bus recover (%u): gpe3 con %#x dat %#x gate %#x int %#x\n",
 						    errors, a5touch_read(s8ts_gpe3, S8TS_GPE3_CON),
+						    a5touch_read(s8ts_gpe3, S8TS_GPE3_CON + 4),
 						    a5touch_read(s8ts_cmutop, S8TS_TOP_USI09_GATE),
 						    a5touch_read(s8ts_i2c, 0x24));
 					}
@@ -806,6 +860,8 @@ dreamlte_touch_start(void)
 	printf("S8 TOUCH: bus maps cmu %d top %d sysreg %d gpe3 %d\n",
 	    s8ts_cmu != 0, s8ts_cmutop != 0, s8ts_sysreg != 0, s8ts_gpe3 != 0);
 	s8i2c_reset(s8ts_i2c);
+	/* Baseline for the wedge dump: the same registers while the bus works. */
+	s8ts_dump_regs("boot regs", 0);
 
 	/* Boot status 0x20 = application firmware. A Note 8 (y661) resets
 	 * with 0x42 and an S8 (y761) with 0x12; sending both costs 100 ms and

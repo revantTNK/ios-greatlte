@@ -1260,8 +1260,76 @@ TWRP's pmsg zone still held the dead kernel's console tail.
   SHA-256 `cfeb0c6c…f171`; the pre-flash BOOT read back as `3a054fb5…fa09d`
   (the cmpalign image); `dd if=/tmp/sysreg.img of=/dev/block/sda7
   bs=1048576 conv=fsync` rc=0 (16+1 records), `sync`; read back 17 MiB and
-  `head -c 16844816` -> `cfeb0c6c…f171`, identical. **Boot result not observed
-  yet.**
+  `head -c 16844816` -> `cfeb0c6c…f171`, identical. **Boot result:** booted
+  into iOS with no panic; touch still wedges after some use - see the next
+  section.
+
+### SYSREG image boots clean, touch still wedges: bus clear + longer waits added (2026-10-25)
+
+- **Observation (boot):** the `greatlte-ts-sysreg-boot.img` boot reaches iOS,
+  the wedge no longer panics, and the dump completes all five lines. Boot
+  markers from the ring: `S8 TOUCH: bus maps cmu 1 top 1 sysreg 1 gpe3 1`,
+  `boot status 0x20`, `fw integrity 0x80 ok`. The fixed SYSREG read now
+  returns `sysreg 0x3` (the loader's value), not a fault.
+- **Observation (wedge), ring `logs/sweetlog-ts-sysreg.txt`** (155 645 bytes,
+  pulled with `tools/dreamlte/pull-sweetlog.sh` in TWRP):
+  `event read failed (1..8) stage write-done byte 255 int 0x0`, then
+  `probe (32)`; at error 64 the dump ran and printed, identically at 64 and
+  128:
+  ```
+  S8 TOUCH: wedge (64): ctl 0x9 trail 0xf int_en 0 int 0 fifo 0x1000100
+  S8 TOUCH: wedge (64): conf 0x9803c1ff auto 0x300ff trans 0xa3070c timeout 0xff addr 0xff0fffff
+  S8 TOUCH: wedge (64): pclk 0x300000 sclk 0x300000 usermux 0 sysreg 0x3
+  S8 TOUCH: wedge (64): topmux 0x1 div 0x3 gate 0x200000
+  S8 TOUCH: wedge (64): gpe3 con 0x110022 dat 0xf2 pud 0x5000 gpa1 dat 0
+  ```
+  Reading: controller programmed (ct 0x9 = enable+master), clocks on
+  (`pclk`/`sclk` 0x300000 = the gate bits), USI09 top gate 0x200000 on,
+  `usermux 0` and `sysreg 0x3` as the loader leaves them, pins still in I2C
+  function 2 (`con 0x110022`), no internal pull (`pud 0x5000`). `dat 0xf2` is
+  SDA (bit 0) **low**, SCL (bit 1) high. `INT_STATUS 0` means no ACK, NACK,
+  no-device or timeout bit was ever set, i.e. the address byte never
+  completed. `gpa1 dat 0` is the touch IRQ line asserted: the IC is alive and
+  trying to interrupt while it answers nothing on I2C.
+- **Observation (no recovery):** `bus recover (64)` and `bus recover (128)`
+  ran (this kernel still had the old recover, hence no `dat` field on those
+  lines), and afterwards the IC stayed silent: `probe (96/128/160/192/224)`
+  all fail with the same `write-done byte 255 int 0x0`, and the ring's touch
+  output stops there while the rest of the log continues (SpringBoard AKS
+  lines). Touch did not come back in that boot.
+- **Hypotheses (guesses, not measured):** (a) the touch IC is holding SDA low
+  mid-byte, or (b) our own pad was left driving SDA low when the 20 ms
+  INT_STATUS wait aborted a transfer the IC was still processing.
+  `s8i2c_reset()` pulses SW_RST and rewrites timing/CTL/CONF but never touches
+  pad function or DAT, so it cannot release a pad driving SDA low;
+  `s8ts_bus_recover()` mostly rewrote registers with the values they already
+  held (`gpe3 con 0x110022` before and after).
+- **Changed in the tree (not built, not booted):**
+  1. `s8ts_bus_kick()`, called first inside `s8ts_bus_recover()`: drive
+     GPE3 pins 0/1 as GPIO outputs, SDA high, nine SCL clock pulses, a STOP,
+     release the pads to input (readback printed as `..., after dat %#x`),
+     then restore CON to function 2. DAT writes keep the pins 4-7 latches.
+     Both the pre-kick and post-kick `gpe3 dat` are logged, and the
+     `bus recover` summary line now carries `dat`.
+  2. `S8I2C_WAIT_US` = 100 000 (was 20 000) for both the INT_STATUS wait and
+     the RX-FIFO wait. i2c-exynos5 waits up to 100 ms in hardware (TMOUT) and
+     Samsung's ICs stretch SCL while their event firmware is busy; aborting
+     such a transfer is what leaves the bus in the SDA-low state. Healthy
+     transfers leave the loop on the first status bit, so this costs nothing.
+  3. `s8ts_dump_wedge()` became `s8ts_dump_regs(tag, errors)` and is also
+     called once at boot right after `s8i2c_reset()` as `boot regs (0)`, so a
+     wedge dump can be compared field by field with a healthy one. Wedge
+     lines keep their exact earlier format.
+- **Tooling:** `tools/dreamlte/sync-patch.py` now keeps
+  `xnu/patches/0124-dreamlte-s8.patch` byte-identical to
+  `tools/dreamlte/dreamlte_touch.c` and validates every hunk's line counts;
+  the driver block is 950 lines and the hunk header is
+  `@@ -615,10 +616,963 @@`.
+- **Next escalation if the kick does not raise SDA:** port the loader's PMIC
+  LDO34/LDO35 touch-rail power cycle (`shim/dreamlte/pmic.c`) into XNU - the
+  loader's own probe only succeeds after a rail power cycle, and XNU has no
+  S2MPS17/SPEY driver to repeat it except via the pinctrl/PMIC registers the
+  0124 patch already maps.
 
 ## Open work
 
@@ -1288,13 +1356,17 @@ TWRP's pmsg zone still held the dead kernel's console tail.
    synchronous external abort, and warm-reset; `s8ts_bus_recover()` therefore
    never ran on any wedged boot. Full evidence and the address fix are in "The
    cmpalign self-reset is a kernel panic in the touch wedge dump" above.
-   The fixed kernel and image are **built and verified** (CI 40133743133,
-   `greatlte-ts-sysreg-boot.img`, `cfeb0c6c…f171`) - see the end of that
-   section. **Next step: flash it to BOOT `sda7` (needs user approval), boot,
-   then read the `wedge (N): ..` / `bus recover (N): ..` lines in the ring or
-   pmsg** - the controller, CMU, SYSREG and pin registers at the failure are
-   what decide whether the bus setup or the IC is at fault, and the recovery now
-   actually runs. Note that `logs/sweetlog-busfix.txt`
+   The fixed kernel and image were **built and verified** (CI 40133743133,
+   `greatlte-ts-sysreg-boot.img`, `cfeb0c6c…f171`) and **flashed to BOOT
+   `sda7`**. **Boot result observed (2026-10-25):** no panic, iOS runs, and
+   the wedge dump completes (`sysreg 0x3`); touch still wedges after some use
+   and stays dead - the dump shows SDA held low, INT_STATUS 0 and the IC IRQ
+   asserted, and the old recover changed nothing. The bus clear, 100 ms waits
+   and boot-time register baseline described in "SYSREG image boots clean,
+   touch still wedges" are in the tree but **not built or booted yet**; next
+   step is CI, then flashing that kernel to BOOT `sda7` with user approval and
+   reading `bus kick: dat … , after dat …` / `boot regs (0): …` against
+   `wedge (N): …` in the ring. Note that `logs/sweetlog-busfix.txt`
    predates the flash (it is an old-kernel boot; see the correction above).
    The 2 GiB RAM question is closed: `greatlte-ts-overflow-2g-cmp-boot.img`
    (`8b2a9dd5...8adccded`, `vm_compression_limit=262144`) boots and shows 2 GiB
