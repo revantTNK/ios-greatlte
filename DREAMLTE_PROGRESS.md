@@ -1084,6 +1084,9 @@ after the user force-rebooted). Two findings, one of them mine.
 
 ### Cmpalign boot: iOS ran ~4 min, then hung and self-reset (2026-10-24 ~18:30)
 
+**Resolved 2026-10-25:** route 1 below was taken and captured a full kernel
+panic in the touch wedge dump - see the next section.
+
 - **Observation (user report):** the `greatlte-ts-cmpalign-boot.img` boot
   reaches iOS and is usable - "i can use the phone as it is until it hangs for
   a bit and then it just reboots". The 0125 commpage fix did its job: this boot
@@ -1139,8 +1142,9 @@ after the user force-rebooted). Two findings, one of them mine.
   (238 s) is close to the reset, but the ring shows the kernel continuing to
   schedule daemons after it. The `MobileSMS` AKS spin started long before the
   wedge and runs throughout, so it is not the trigger either.
-- **Next measurement planned - get the dying boot's console text.** Two routes,
-  both needing the phone:
+- **Next measurement planned - get the dying boot's console text** (done
+  2026-10-25 by route 1; kept for reference). Two routes, both needing the
+  phone:
   1. **No flash:** reproduce the hang and, at the moment it hangs / as it
      resets, hold **Vol Up + Bixby + Power** so S-Boot enters TWRP instead of
      BOOT `sda7`. The dreamlte loader then never runs and this TWRP's pmsg zone
@@ -1152,6 +1156,84 @@ after the user force-rebooted). Two findings, one of them mine.
      alone when the zone is already full. The loader builds locally
      (`shim/dreamlte/build.sh`, aarch64-linux-gnu-gcc) and the kernel payload is
      unchanged, so this needs no CI run; it does need a BOOT `sda7` flash.
+
+### The cmpalign self-reset is a kernel panic in the touch wedge dump (2026-10-25)
+
+The dying boot's console was captured without flashing anything: after the
+hang/self-reset the phone was taken straight into TWRP (Vol Up + Bixby + Power,
+not released until TWRP came up), so S-Boot never ran BOOT `sda7` and this
+TWRP's pmsg zone still held the dead kernel's console tail.
+
+- **Observation (capture):** `adb pull /sys/fs/pstore/pmsg-ramoops-0` ->
+  `logs/pmsg-cmpalign-hang.bin` (16 372 bytes = 16 384 - 12; text in
+  `logs/pmsg-cmpalign-hang.txt`, tail in `logs/pmsg-cmpalign-hang-tail.txt`).
+  The 16 KiB zone had wrapped, so the `--- XNU console ---` banner and the boot
+  text are gone (`grep -c` on the text: `XNU console` 0). What remains is the
+  last ~16 KiB of kernel console: `SWEET AKS:` lines, daemon `exec`s,
+  `SWEET FB: display on`, `SWEET SURF: backboardd create id 2 1440x2960 fmt
+  0x42475241 bpe 4 bpr 5888 planes 0 size 17432576 keys 11`, `SWEET SURF:
+  backboardd trap 2`/`trap 3`, `SWEET FB: staged present, stage 1440x2960, 1:1`,
+  and then the end of the log:
+
+  ```
+  Unclassified kernel abort (fault_code=0x10)
+  panic(cpu 1 caller 0xfffffff007ac014c): Kernel data abort. at pc 0xfffffff00748f748, lr 0xfffffff00748f710 (saved state: 0xfffffff8aef6fa10)
+        x11: 0xfffffff69a82d000 ...
+        pc:  0xfffffff00748f748 cpsr: 0x60000204         esr: 0x96000210          far: 0xfffffff69a82e01c
+  ```
+
+  There are **no** `S8 TOUCH:` lines in the window and no `wedge`, `bus
+  recover` or `S8 AUTORESET` line either (all four greps: 0 hits).
+- **Observation (symbolization against the 0125 kernel, CI 40104283246):**
+  `pc 0xfffffff00748f748` = `_s8ts_thread + 0x3e8`, `lr ...f710` = `+0x3b0`,
+  `caller 0xfffffff007ac014c` = `_sleh_synchronous_sp1`. The faulting
+  instruction is `ldr w11, [x11, #0x101c]`, inside the third `printf` of the
+  inlined `s8ts_dump_wedge()` (`S8 TOUCH: wedge (%u): ... pclk %#x sclk %#x
+  usermux %#x sysreg %#x`, format string at VA +0xe5c of the text segment),
+  reading `s8ts_sysreg` from x11.
+- **Observation (fault decoding):** `esr 0x96000210` -> EC 0x25 (data abort
+  taken at the same EL), WnR=0 (a read), DFSC 0x10 = **synchronous external
+  abort**. That is not a translation fault (DFSC 0x4-0x7): the VA had a valid
+  leaf; the *bus* aborted the physical access. `far 0xfffffff69a82e01c` is
+  exactly `x11 + 0x101c` (`x11` = `s8ts_sysreg`), and both lie inside the same
+  16K VM page, so the MMU had it mapped.
+- **Root cause:** `S8TS_SYSREG_PA 0x10821000` + `S8TS_SYSREG_USI09 0x101c`
+  addresses PA **0x1082201c**, but the USI09 register is PA **0x1082101c**
+  (`shim/dreamlte/touch_probe.c`: `#define SYSREG_USI09 0x1082101cUL`; USI13 is
+  `0x1082102c` - both are the 0x10821000 block plus 0x1c / 0x2c, and the loader
+  pmsg shows it reading `sysreg=0x0` and writing `sysreg=0x3` there on every
+  probe). 0x1082201c is in the next 4 KiB page, which the SYSREG block does not
+  decode, so the read returns an external abort -> XNU panics ->
+  `s8_halt_restart()` (0124, `pe_serial.c`) warm-resets the phone. The same
+  macro pair is used by `s8ts_bus_recover()`, so the IC recovery never ran: the
+  panic kills the inlined dump at the third of its five lines.
+- **Observation (timing):** each failing transfer costs ~20 ms (20 000 us loop
+  in `s8i2c_wait_done`) + 20 ms worker sleep, so the dump fires at error 64
+  about 2.6 s after the first WRITE-stage failure. That is the "hangs for a bit
+  and then it just reboots" the user saw: the freeze is the wedge, the reboot is
+  this panic, not a watchdog.
+- **Corollary on captures:** the ring (`logs/sweetlog-cmpalign.txt`) of the same
+  boot ended at ~32 errors because the ring flushes on a timer; the pmsg zone is
+  written per character and was the only one that survived. For post-mortems,
+  pmsg + TWRP-without-loader is the reliable route.
+- **Unexplained:** the first two `s8ts_dump_wedge()` printf lines (`... ctl ...
+  trail ...`, `... conf ... auto ...`) execute before the faulting one but do not
+  appear in pmsg at all. The last non-panic console line is an unrelated display
+  line (`SWEET FB: staged present`), so one guess is that the console path had
+  not transmitted them when the panic printer wrote; not proven. It does not
+  affect the diagnosis - pc, far and esr are self-contained.
+- **Fixed in the tree (2026-10-25; kernel build and boot pending):**
+  `S8TS_SYSREG_USI09` is now
+  `0x1c` from the unchanged `0x10821000` base - the loader's absolute
+  0x1082101c, and inside the 4 KiB that `ml_io_map()` is asked for, so no
+  dependence on how it rounds a 16K page. The change is in
+  `tools/dreamlte/dreamlte_touch.c` and `xnu/patches/0124-dreamlte-s8.patch`
+  (the whole S8 layer lives in one added block there; the hunk's new-line count
+  went 900 -> 907 for the added comment).
+- **Still open:** what makes the IC stop answering in the WRITE phase at ~238 s.
+  The register dump meant to answer that is exactly what panicked on every
+  wedged boot; with the address fixed the dump completes and
+  `s8ts_bus_recover()` runs for the first time.
 
 ## Open work
 
@@ -1172,18 +1254,18 @@ after the user force-rebooted). Two findings, one of them mine.
    verified and **flashed 2026-10-24 18:25 +03** (read back identical).
    **Boot result now observed (2026-10-24 ~18:30):** this image boots into iOS
    and is usable for ~4 minutes; then it hangs briefly and **self-resets**.
-   The ring (`logs/sweetlog-cmpalign.txt`) shows the WRITE-stage wedge starting
-   at 238 s and reaching ~32 errors, the kernel still scheduling daemons, and
-   **no** `wedge (N)` / `bus recover (N)` dump (that needs error 64). pmsg holds
-   only the post-reset loader text, so the cause of the reset is not captured
-   yet - details, evidence and the two capture routes are in the "Cmpalign boot"
-   section above. **Next step: capture the dying boot's console text** (enter
-   TWRP straight from the hang, or flash a loader that preserves pmsg), then
-   read `wedge (N): .. gpe3 con ..` / `bus recover (N): ..` - the controller,
-   CMU and pin registers at the failure are what decide whether the bus setup or
-   the IC is at fault. Lines to look for are listed at the end of the section
-   above. Note that `logs/sweetlog-busfix.txt` predates the flash (it is an
-   old-kernel boot; see the correction above).
+   **Cause found and fixed in the tree (2026-10-25):** the reset is a kernel
+   panic inside the wedge dump - the dump read SYSREG at PA 0x1082201c instead
+   of the loader's 0x1082101c (base 0x10821000 plus a 0x101c offset), got a
+   synchronous external abort, and warm-reset; `s8ts_bus_recover()` therefore
+   never ran on any wedged boot. Full evidence and the address fix are in "The
+   cmpalign self-reset is a kernel panic in the touch wedge dump" above.
+   **Next step: build the fixed kernel, make a BOOT image and flash it (needs
+   user approval), then boot and read the `wedge (N): ..` / `bus recover (N): ..`
+   lines in the ring or pmsg** - the controller, CMU, SYSREG and pin registers
+   at the failure are what decide whether the bus setup or the IC is at fault,
+   and the recovery now actually runs. Note that `logs/sweetlog-busfix.txt`
+   predates the flash (it is an old-kernel boot; see the correction above).
    The 2 GiB RAM question is closed: `greatlte-ts-overflow-2g-cmp-boot.img`
    (`8b2a9dd5...8adccded`, `vm_compression_limit=262144`) boots and shows 2 GiB
    on the phone; the 1 GiB fallback is

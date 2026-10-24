@@ -65,7 +65,14 @@
 #define S8TS_RECOVER_COOLDOWN_MS 60000u
 
 /* USI09/hsi2c_23 bring-up registers, copied from shim/dreamlte/touch_probe.c
- * so the wedge dump and the bus recovery use the loader's own values. */
+ * so the wedge dump and the bus recovery use the loader's own values.
+ *
+ * SYSREG holds USI09 at absolute 0x1082101c and USI13 at 0x1082102c, i.e. the
+ * 0x10821000 block plus 0x1c / 0x2c. An earlier revision paired the 0x10821000
+ * base with a 0x101c offset, so every touch-driver access went to 0x1082201c,
+ * the next 4 KiB page, which the SYSREG block does not decode. That address
+ * traps as a synchronous external abort, which panicked the kernel inside the
+ * first wedge dump and before s8ts_bus_recover() could run. */
 #define S8TS_CMU_PERIC1_PA      0x10800000u
 #define S8TS_CMU_TOP_PA         0x15a80000u
 #define S8TS_SYSREG_PA          0x10821000u
@@ -73,7 +80,7 @@
 #define S8TS_P1_USI09_PCLK      0x20acu
 #define S8TS_P1_USI09_SCLK      0x20b0u
 #define S8TS_P1_USI09_USER_MUX  0x0240u
-#define S8TS_SYSREG_USI09       0x101cu
+#define S8TS_SYSREG_USI09       0x01cu
 #define S8TS_GPE3_CON           0x120u
 #define S8TS_TOP_USI09_MUX      0x10e0u
 #define S8TS_TOP_USI09_DIV      0x18e8u
@@ -304,7 +311,7 @@ s8ts_probe_ic(unsigned errors)
  * controller or its clock being gone (iOS gating a USI09 clock or the GPE3
  * pads re-muxed); those are exactly the registers the loader sets up, so dump
  * them, then put the loader's values back and re-init the controller. Reads
- * only in the dump: CMU and pin blocks are always-on. */
+ * only in the dump: CMU, SYSREG and pin blocks are always-on. */
 static bool
 s8ts_bus_maps_ok(void)
 {
