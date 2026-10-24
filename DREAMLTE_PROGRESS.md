@@ -1206,7 +1206,11 @@ TWRP's pmsg zone still held the dead kernel's console tail.
   decode, so the read returns an external abort -> XNU panics ->
   `s8_halt_restart()` (0124, `pe_serial.c`) warm-resets the phone. The same
   macro pair is used by `s8ts_bus_recover()`, so the IC recovery never ran: the
-  panic kills the inlined dump at the third of its five lines.
+  panic kills the inlined dump at the third of its five lines. (The earlier
+  commpage panic hung instead of resetting because it fired before
+  `s8_restart_init()` ran at the end of `fbcon_probe()`; by the time iOS is up,
+  `PE_halt_restart` is `s8_halt_restart()`, which writes PMU SWRESET for every
+  panic restart type, with or without `s8autoreset`.)
 - **Observation (timing):** each failing transfer costs ~20 ms (20 000 us loop
   in `s8i2c_wait_done`) + 20 ms worker sleep, so the dump fires at error 64
   about 2.6 s after the first WRITE-stage failure. That is the "hangs for a bit
