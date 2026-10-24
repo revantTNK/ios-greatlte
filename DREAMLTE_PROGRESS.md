@@ -1305,12 +1305,16 @@ TWRP's pmsg zone still held the dead kernel's console tail.
   `s8ts_bus_recover()` mostly rewrote registers with the values they already
   held (`gpe3 con 0x110022` before and after).
 - **Changed in the tree (not built, not booted):**
-  1. `s8ts_bus_kick()`, called first inside `s8ts_bus_recover()`: drive
-     GPE3 pins 0/1 as GPIO outputs, SDA high, nine SCL clock pulses, a STOP,
-     release the pads to input (readback printed as `..., after dat %#x`),
-     then restore CON to function 2. DAT writes keep the pins 4-7 latches.
-     Both the pre-kick and post-kick `gpe3 dat` are logged, and the
-     `bus recover` summary line now carries `dat`.
+  1. `s8ts_bus_kick()`, called first inside `s8ts_bus_recover()`: SCL
+     (gpe3-1) becomes a GPIO output while SDA (gpe3-0) is **released to
+     input** - whatever holds SDA low must not be fought by the pad - then
+     nine SCL pulses so a mid-byte slave finishes, then the STOP with SCL low,
+     SDA driven low, SCL high, SDA high; both pads released to input and the
+     level read back (`..., after dat %#x`), then CON restored to function 2.
+     DAT writes keep the pins 4-7 latches. Both the pre-kick and post-kick
+     `gpe3 dat` are logged, and the `bus recover` summary line now carries
+     `dat`. (First version drove SDA as an output high during the clocks; that
+     would fight a slave holding the line, so it was fixed before building.)
   2. `S8I2C_WAIT_US` = 100 000 (was 20 000) for both the INT_STATUS wait and
      the RX-FIFO wait. i2c-exynos5 waits up to 100 ms in hardware (TMOUT) and
      Samsung's ICs stretch SCL while their event firmware is busy; aborting
@@ -1323,8 +1327,8 @@ TWRP's pmsg zone still held the dead kernel's console tail.
 - **Tooling:** `tools/dreamlte/sync-patch.py` now keeps
   `xnu/patches/0124-dreamlte-s8.patch` byte-identical to
   `tools/dreamlte/dreamlte_touch.c` and validates every hunk's line counts;
-  the driver block is 950 lines and the hunk header is
-  `@@ -615,10 +616,963 @@`.
+  the driver block is 957 lines and the hunk header is
+  `@@ -615,10 +616,970 @@`.
 - **Next escalation if the kick does not raise SDA:** port the loader's PMIC
   LDO34/LDO35 touch-rail power cycle (`shim/dreamlte/pmic.c`) into XNU - the
   loader's own probe only succeeds after a rail power cycle, and XNU has no

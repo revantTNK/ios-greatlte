@@ -92,7 +92,7 @@ index 7ba309b..0571e4c 100644
  
  extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
  extern void thread_terminate_self(void);
-@@ -615,10 +616,963 @@ a5touch_start_early(vm_offset_t nfc, vm_offset_t alive)
+@@ -615,10 +616,970 @@ a5touch_start_early(vm_offset_t nfc, vm_offset_t alive)
  	}
  }
  
@@ -462,11 +462,13 @@ index 7ba309b..0571e4c 100644
 + * pad was left driving SDA low when the controller aborted, no START can ever
 + * complete and INT_STATUS stays 0 forever - the wedge. Exynos pin CON nibble 1
 + * is GPIO output, 0 is input, >= 2 is the peripheral function; SDA is gpe3-0
-+ * and SCL gpe3-1 (shim/dreamlte/touch_probe.c). Drive both as GPIO, clock SCL
-+ * nine times with SDA released so a slave finishes its byte, issue a STOP,
-+ * then release the pads to input and read the levels back. GPxDAT has one bit
-+ * per pad and pins 4-7 are GPIO outputs held high, so every DAT write keeps
-+ * their latches (mask ~3). */
++ * and SCL gpe3-1 (shim/dreamlte/touch_probe.c). Take SCL as a GPIO output but
++ * release SDA to input first - the wedge has SDA low, and whatever is holding
++ * it must not be fought by the pad; the pullup (or the slave finishing its
++ * byte) raises it. Clock SCL nine times so a mid-byte slave completes, drive
++ * the STOP (SDA low->high while SCL high), release both pads and read the
++ * levels back. GPxDAT has one bit per pad and pins 4-7 are GPIO outputs held
++ * high, so every DAT write keeps their latches (mask ~3). */
 +static void
 +s8ts_bus_kick(void)
 +{
@@ -477,16 +479,21 @@ index 7ba309b..0571e4c 100644
 +	uint32_t dat = a5touch_read(s8ts_gpe3, S8TS_GPE3_CON + 4);
 +
 +	printf("S8 TOUCH: bus kick: dat %#x", dat);
-+	a5touch_write(s8ts_gpe3, S8TS_GPE3_CON, (con & ~0xfu) | 0x11u);   /* both GPIO out */
-+	a5touch_write(s8ts_gpe3, S8TS_GPE3_CON + 4, (dat & ~3u) | 3u);    /* both high */
++	a5touch_write(s8ts_gpe3, S8TS_GPE3_CON, (con & ~0xfu) | 0x10u);   /* SCL out, SDA in */
++	a5touch_write(s8ts_gpe3, S8TS_GPE3_CON + 4, (dat & ~3u) | 2u);    /* SCL high */
 +	delay(5);
 +	for (unsigned i = 0; i < 9; i++) {
-+		a5touch_write(s8ts_gpe3, S8TS_GPE3_CON + 4, (dat & ~3u) | 1u);   /* SCL low */
++		a5touch_write(s8ts_gpe3, S8TS_GPE3_CON + 4, (dat & ~3u));         /* SCL low */
 +		delay(5);
-+		a5touch_write(s8ts_gpe3, S8TS_GPE3_CON + 4, (dat & ~3u) | 3u);   /* SCL high */
++		a5touch_write(s8ts_gpe3, S8TS_GPE3_CON + 4, (dat & ~3u) | 2u);    /* SCL high */
 +		delay(5);
 +	}
-+	a5touch_write(s8ts_gpe3, S8TS_GPE3_CON + 4, (dat & ~3u) | 2u);    /* SDA low, SCL high */
++	a5touch_write(s8ts_gpe3, S8TS_GPE3_CON + 4, (dat & ~3u));         /* SCL low */
++	delay(5);
++	a5touch_write(s8ts_gpe3, S8TS_GPE3_CON, (con & ~0xfu) | 0x11u);   /* SDA out too */
++	a5touch_write(s8ts_gpe3, S8TS_GPE3_CON + 4, (dat & ~3u));         /* SDA low, SCL low */
++	delay(5);
++	a5touch_write(s8ts_gpe3, S8TS_GPE3_CON + 4, (dat & ~3u) | 2u);    /* SCL high */
 +	delay(5);
 +	a5touch_write(s8ts_gpe3, S8TS_GPE3_CON + 4, (dat & ~3u) | 3u);    /* STOP: SDA high */
 +	delay(5);
