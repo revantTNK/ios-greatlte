@@ -1869,18 +1869,42 @@ the ring has been pulled for this boot yet (a TWRP reboot is needed), so the
 verified (`cpus=8`, 4 GiB, canvas 1080x2220) and the previous 4 GiB boot
 measured 258 468 free pages and 8/8 CPUs.
 
-**Reading, not confirmed: the red bar is SpringBoard's unsupported-display
-debug banner.** It names an Apple Radar (`rdar:45025538`) and is drawn where
-the status bar should be, which is the shape of a fallback/misconfigured
-status-bar visual provider rather than a rendering bug of ours: 1080x2220
-(360x740 pt at 3x) matches no Apple device, while 1125x2436 was exactly the
-iPhone X that UIKit identified (`375x812@3x`). Two candidate fixes, both
-cheap to try as boot images: (a) an Apple metric that keeps the aspect close
-to the panel (e.g. 1170x2532 = iPhone 12/13 mini, `out_w = 1368`, 36 px
-side bars), which risks the same `BoundingPathBitmap` abort that killed
-1125x2436; (b) leave 1080x2220 and hide/replace the banner in userland.
-Finding the string in the shipped binaries is the next desk step: it says
-which component draws it and what condition gates it.
+**The red bar identified in UIKitCore (found 2026-10-25, desk work only).**
+The radar number is a string in the shipped iOS 16.7 system volume:
+`No status bar visual provider for screen %@ (width: %.2f, scale: %.2f,
+idiom: %ld, cornerRadius: %.2f). Please see rdar://45025538.` (one
+occurrence in `ios16-root.img`, at byte offset 9 327 990 432, surrounded by
+`UIStatusBarVisualProviderClassName` and `WARNING: Using overridden status
+bar visual provider class: %@`). So this is **not** a rendering bug of ours:
+UIKit has a per-screen status-bar provider and, finding none for
+360.0 pt / scale 3 / phone, uses the fallback provider, which draws the red
+emoji-plus-radar banner in place of the clock and battery.
+
+The providers, extracted from the same image, are named by pixel width:
+`_UIStatusBarVisualProvider_Split828`, `_Split1080`, `_Split1125`,
+`_Split1170`, `_Split1242`, `_Split1284` (plus `_Wide` variants), with
+`_LegacyPhone`, `_Fallback`, `_CustomSplit`, `_DynamicSplit`,
+`_ExternalPad` and the Pad family. The lookup is keyed on
+(width, scale, idiom, **cornerRadius**), so a size is only "known" when it
+is a real device's geometry: 1080x2220 is 360x740 pt at 3x and exists
+nowhere in UIKit's tables, so no provider matches.
+
+**Consequence for the next trial (analysis, not tested):** the two quirks
+are two sides of the same coin. A real Apple size gets a real provider (no
+banner) but a non-zero corner radius, hence
+`_UIScreenComplexBoundingPathUtilities` and the `BoundingPathBitmap` load
+that black-screened 1125x2436; a made-up size gets zero corner radius and
+the rectangular path (no crash) but no provider (banner). The catalog in
+`UIKitCore.framework/BoundingPathData.bundle/Assets.car` covers only real
+geometries - 1125x2436, 1170x2532, 1179x2556, 1242x2688, 1284x2778,
+1290x2796, 828x1792 (2x), 1080x2340 with `-320x693`/`-375x812` bounds
+(i.e. only when UIKit reports the mini's 375x812 pt) - and the entry that
+failed, `BoundingPathBitmap-1125x2436-375x812-3.00x`, **is present** in the
+shipped catalog, so the load failure is runtime, not a missing asset. That
+failure is now the blocker for a clean status bar, and it is what to look
+at next; the cheapest observation is the current boot's ring, which may
+carry the `No status bar visual provider for screen … (width: …, scale:
+…, idiom: …, cornerRadius: …)` line with the exact values UIKit computed.
 
 ## Open work
 
