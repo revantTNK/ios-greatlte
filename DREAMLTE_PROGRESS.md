@@ -1562,32 +1562,69 @@ TWRP's pmsg zone still held the dead kernel's console tail.
     it crosses, once for the V=P map and once for the KVA map, **plus one
     more for the dreamlte framebuffer mapping** (patch 0124 maps the DECON
     scanout `0xcc000000` VA=PA with `A5_FB_2M_BLOCKS 9` blocks; its L1 index
-    differs from isolated XNU RAM, so it cannot share an L2 page). Total:
-    **2 L1 + 2x(entries) L2 + 1 fb = 11 pages at 4 GiB**, 9 at 3 GiB, 7 at
-    2 GiB. `BOOTSTRAP_TABLE_SIZE` is `ARM_PGBYTES * 8` here (our build has no
-    `ARM_LARGE_MEMORY`, no KTRR/CTRR), proven by `llvm-nm` on the old CI
-    kernel: `_bootstrap_pagetables 0xfffffff00717a000`, `_avail_end
-    0xfffffff007182000` - exactly 8 x 4096 bytes apart. So every size above
-    2 GiB writes past the array; 2 GiB (7 pages) is the old kernel's exact
-    ceiling, which is why it has always booted. (The first count here
-    omitted the framebuffer page and predicted 3 GiB fits - the 3 GiB boot
-    below falsified it; this is the corrected count.)
+    differs from isolated XNU RAM, so it cannot share an L2 page). Exact
+    count, since the two maps start at different L2 indices - V=P at index 8
+    of its L1, KVA at index 56 (patch 0124's fb map is a third, one-page
+    map): V=P L2 pages `ceil((8 + entries)/512)` = 2 / 3 / 4, KVA L2 pages
+    `ceil((56 + entries)/512)` = 3 / 4 / 5, plus 2 L1 tables and 1 fb page.
+    **Total 8 pages at 2 GiB, 10 at 3 GiB, 12 at 4 GiB.** `BOOTSTRAP_TABLE_SIZE`
+    is `ARM_PGBYTES * 8` here (our build has no `ARM_LARGE_MEMORY`, no
+    KTRR/CTRR), proven by `llvm-nm` on the old CI kernel: `_bootstrap_pagetables
+    0xfffffff00717a000`, `_avail_end 0xfffffff007182000` - exactly 8 x 4096
+    bytes apart. So 2 GiB fills the array to its last byte (which is why it
+    has always booted) and every size above it writes past the end. (Two
+    earlier counts here were wrong: the first omitted the framebuffer page,
+    the second assumed the KVA map needed the same number of L2 pages as
+    V=P despite starting 56 entries into its L1. The 3 GiB boot below
+    falsified both.)
   - The victims are in `__DATA_CONST` right after the array, verified with
-    `llvm-nm` on the CI kernel: page `0xfffffff007182000` holds
-    `_avail_end`, `_real_avail_end`, `_first_avail`, `_vm_kernel_slide`,
-    `_cpu_config_correct`, `_topology_cpu_array`,
-    `_topology_cluster_array` and `_topology_info`. The first two of those
-    are ones `arm_vm_init` reassigns before use, but `topology_info` still
-    holds its static initialiser (`num_cpus`, `num_clusters`, `cpus`,
-    `clusters` pointers). `ml_parse_cpu_topology()` reads
-    `topology_info.num_cpus` before writing it, sees a block descriptor,
-    breaks out of the EDT loop at once and then walks `topology_info.cpus`
-    / `.clusters` as pointers. That happens well before `fbcon_probe` and
-    `klog_init`, which is exactly the observed silence.
+    `llvm-nm` on the old CI kernel. Page `0xfffffff007182000` (the 9th page,
+    written first by the KVA map's last L2 page) holds, in order:
+    `_avail_end`, `_real_avail_end`, `_sectSizeHIBTEXT`, `_sectHIBTEXTB`,
+    `_sectSizeHIBDATACONST`, `_sectHIBDATACONSTB`, `_segSizeKCTEXTEXEC`,
+    `_segKCTEXTEXECB`, `_segSizeKCDATACONST`, `_segKCDATACONSTB`,
+    `_segSizeKCDATA`, `_segKCDATAB`, `_etext`, `_sdata`, `_edata`,
+    `_segHIGHESTKC`, `_vm_kernel_base/top`, `_vm_kext_base/top`,
+    `_vm_prelink_*`, `_vm_slinkedit/elinkedit`,
+    `_arm_vm_kernelcache_phys_*`, `_seg{LOWEST,HIGHEST}{RO,RX,}AuxKC`,
+    `_vm_kernel_slid_base`, `_vm_kernel_stext`, `_vm_kernel_etext`,
+    `_vm_kernel_slid_top`, `_first_avail`, `_vm_kernel_slide`,
+    `_segHIGHESTNLEAuxKC`; `_cpu_config_correct` is at `0x182194` and
+    `_topology_info` at `0x1825e8`. **At 3 GiB the overflow is only two
+    pages:** the KVA page at `0x182000` gets 47 entries (376 bytes,
+    through `_segHIGHESTNLEAuxKC`) and the fb page at `0x183000` gets 9
+    entries (`_dtrace_*_zone`, `_dtrace_lck_attr`, the dtrace sysctls).
+    `_topology_info` and `_cpu_config_correct` therefore **survive** at
+    3 GiB - which is why stages 1-7 still print - so the earlier
+    "topology_info is the victim" explanation applies only to 4 GiB, where
+    the KVA map overflows four pages (`0x182000`-`0x185000`, three of them
+    dense/full, wiping `topology_info`, `cpu_config_correct`,
+    `cluster_offsets`, `commPagePtr` and more).
+  - **The likely fatal read at 3 GiB is `_segHIGHESTKC` (`0x182078`).** The
+    kernel is a static kernelcache, not an MH_FILESET (`filetype 0x2` in
+    the Mach header), so `arm_slide_rebase_and_sign_image()` never sets
+    `segHIGHESTKC`; on a healthy boot it is 0 and `arm_vm_init` falls
+    through to `getlastkerneladdr()` (line 2074). Clobbered with a
+    2 MiB block descriptor it is non-zero, so `end_kern` becomes that
+    descriptor, `vm_kernelcache_top` is set from it (`arm_vm_prot_init`,
+    line 1451) and `arm_vm_physmap_init` uses it as the start of the
+    "rest of physmem" slide (line 1569: the length `topOfKernelData -
+    end_kern` goes negative) and in `PE_slide_devicetree` (line 1571).
+    That is inside `arm_vm_init`, before `fbcon_probe`/`klog_init`, which
+    matches the silence. This is the reasoned mechanism, not yet confirmed
+    by an on-hardware panic string - the fixed image will make it moot.
+  - The other clobbered globals that `arm_vm_init` reassigns are harmless:
+    `avail_end`/`real_avail_end` (lines 1957/1961), the `sect*`/`seg*KC*`
+    sizes (lines 2020-2049), `etext`/`sdata`/`edata` (2071-2073),
+    `vm_kernel_base/top` (2078-2079), `vm_kernel_slid_*` (2205+).
+    `arm_vm_auxkc_init()` returns false (no auxKC in our boot args), so
+    the `segLOWESTAuxKC` assert is not reached. The earlier note here that
+    those three were the killer was wrong.
   - The DEVELOPMENT sanity check that should have caught it
     (`arm_vm_init.c`, "BOOTSTRAP_TABLE_SIZE too small for memory config")
-    is a units bug: it compares a page count (`pages_used`, 10) against a
-    byte count (`BOOTSTRAP_TABLE_SIZE`, 32 768), so it can never fire.
+    is a units bug: it compares a page count (`pages_used`, 12 at 4 GiB)
+    against a byte count (`BOOTSTRAP_TABLE_SIZE`, 32 768), so it can never
+    fire.
   - **Fix written and built:** `xnu/patches/0126-dreamlte-4g-bootstrap-tables.patch`
     (mirrored in `tools/dreamlte/apply-dreamlte.py`) raises
     `BOOTSTRAP_TABLE_SIZE` to the `ARM_LARGE_MEMORY` bound (34 pages, up to
@@ -1611,16 +1648,17 @@ TWRP's pmsg zone still held the dead kernel's console tail.
     `JUMP TO XNU`, and nothing after; `logs/sweetlog-3g8c.txt` is
     **stale** - it is the last successful 2 GiB 8-core boot (flush #51,
     02:32, `vm_page_bootstrap: 127919 free pages` = 2 GiB at 16 KiB), so the
-    3 GiB XNU never reached `klog_init()`. At 3 GiB the 9th bootstrap table
-    page lands exactly on `_avail_end`/`_real_avail_end` +
-    `_vm_kernel_stext`/`_vm_kernel_slid_base` and friends
-    (`0xfffffff007182000`+): `arm_vm_init` reads `segLOWESTAuxKC != segLOWEST`
-    (panics), `vm_kernel_slid_*` before `arm_slide_rebase` re-derives them
-    from `seg*`, and `lowmem_vectors` uses `vm_kernel_stext` as an address.
-    So the 3 GiB run died in `arm_vm_init`, before any console - matching
-    the photo. The old "3 GiB needs 8 pages, should boot" prediction is
-    **falsified**; 3 GiB needs 9 (the framebuffer page is the missing one).
-  - **Fixed 4 GiB image built and verified, not yet flashed:** CI 40189987396
+    3 GiB XNU never reached `klog_init()`. At 3 GiB the overflow is two
+    pages (`0xfffffff007182000` and `0xfffffff007183000`), and the fatal
+    one is `_segHIGHESTKC` (0x182078) feeding `end_kern` - see the
+    root-cause bullet above. `_topology_info`/`_cpu_config_correct` are
+    untouched at 3 GiB, which is why stages 1-7 print; the death is later
+    in `arm_vm_init` (`arm_vm_prot_init`/`arm_vm_physmap_init`), still
+    before `fbcon_probe` and `klog_init`. The earlier "segLOWESTAuxKC /
+    vm_kernel_slid_*" explanation for the silence was wrong. The old
+    "3 GiB needs 8 pages, should boot" prediction is **falsified**; 3 GiB
+    needs 10.
+  - **Fixed 4 GiB image flashed and verified (2026-10-25).** CI 40189987396
     kernel (`50042ca4…1f8d47`), `S8_DRAM_MIB=4096`, the same `cpus=8`
     cmdline. Image `shim/dreamlte/out/greatlte-4g-8core-0126-boot.img`,
     **16 975 888 bytes**, SHA-256
@@ -1630,16 +1668,25 @@ TWRP's pmsg zone still held the dead kernel's console tail.
     (4096 MiB), window `[0x880000000, 0x980000000)`; entry PA
     `0x881444488`; 10 segments `0x881004000…0x882500000+0x3b5f38`;
     `adt_pa 0x8828b8000`, `boot_args 0x8828bb000`; embedded cmdline is the
-    `cpus=8` one, 355 bytes.
+    `cpus=8` one, 355 bytes. Pushed to TWRP, on-phone `sha256sum` matched,
+    written to BOOT `sda7` with `dd bs=1048576 conv=fsync`, `sync`, and
+    the read-back hash matched (`dd | head -c 16975888 | sha256sum`).
+    Pre-flash `sda7` hash was `84d7435b…b0e9d` (the 3 GiB image). **Boot
+    result not yet observed** - the user is about to reboot into it.
 - **What a boot should show:** `vm_page_bootstrap:` about 258 000-262 000
   free pages (4 GiB at 16 KiB pages, versus 127 919 at 2 GiB), the
   `S8 KMEM:` claims line roughly unchanged (hole a little smaller because
   the identity physmap grows with RAM), `8/8 CPUs initialized, SGI1
-  verified`, and the touch `boot regs (0)` lines. If it panics in
-  `kmem_range_init` (like the pre-`vm_compression_limit` 2 GiB boots), the
-  panic is before the console exists - recover with the key combo, pull
-  nothing (there will be no new ring), and reflash
-  `greatlte-ts-8core-boot.img` (`9ebd6555…5d0b`).
+  verified`, and the touch `boot regs (0)` lines. If it panics pre-console,
+  recover with the key combo, pull nothing (there will be no new ring), and
+  reflash `greatlte-ts-8core-boot.img` (`9ebd6555…5d0b`). Note that at
+  3-4 GiB the klog/ramoops zones `A5_KLOG_PHYS 0x92180000` and
+  `A5_KLOG2_PHYS 0x92004000` now fall **inside** XNU's RAM window
+  (`[0x880000000, 0x980000000)`), whereas at 2 GiB they were above it.
+  Early boot still writes there, but once the VM allocator runs those
+  physical pages are ordinary free memory and may be reused, so ring
+  continuity for a late panic is not guaranteed at this size (not yet
+  measured; the 2 GiB rings were always outside the window).
 
 ## Open work
 
@@ -1698,15 +1745,16 @@ TWRP's pmsg zone still held the dead kernel's console tail.
    `logs/sweetlog-8core.txt`, 1066 MHz per Mongoose core). 4 GiB + 8 cores
    first panicked before the console; the 3 GiB confirmation image
    **panicked the same way (pre-console)**, which - with the corrected
-   count including the framebuffer's extra L2 page - confirms the
-   bootstrap-table overflow as the cause at every size above 2 GiB (7
-   pages needed at 2 GiB, 9 at 3 GiB, 11 at 4 GiB, against an 8-page
-   table). **Patch 0126 is built** (CI 40189987396, kernel
-   `50042ca4…1f8d47`) and the fixed 4 GiB image
-   `greatlte-4g-8core-0126-boot.img` (`db3a5f8a…839b5f`) is **built,
-   verified, not yet flashed**. Open: flash it, boot 4 GiB (expect ~258
-   000-262 000 free pages, 8/8 CPUs). If it still dies pre-console, build a
-   3 GiB image with the 0126 kernel as the fallback. Then L2/non-CPU power, the
+   count including the framebuffer's extra L2 page and the KVA map's
+   56-entry offset - confirms the bootstrap-table overflow as the cause at
+   every size above 2 GiB (8 pages needed at 2 GiB, 10 at 3 GiB, 12 at
+   4 GiB, against an 8-page table). **Patch 0126 is built** (CI 40189987396,
+   kernel `50042ca4…1f8d47`) and the fixed 4 GiB image
+   `greatlte-4g-8core-0126-boot.img` (`db3a5f8a…839b5f`) is **flashed to
+   BOOT `sda7`** (2026-10-25, read-back hash identical). Open: boot it 4
+   GiB (expect ~258 000-262 000 free pages, 8/8 CPUs) and pull the ring.
+   If it still dies pre-console, build a 3 GiB image with the 0126 kernel as
+   the fallback. Then L2/non-CPU power, the
    A53 clock (1689 MHz worked in c10; daily setting 1690/1703) and GPU.
    Multi-range physical memory (the two low GiB) would need pmap work and is
    not planned yet.
