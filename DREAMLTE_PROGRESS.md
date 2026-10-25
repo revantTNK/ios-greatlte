@@ -1693,6 +1693,46 @@ TWRP's pmsg zone still held the dead kernel's console tail.
   continuity for a late panic is not guaranteed at this size (not yet
   measured; the 2 GiB rings were always outside the window).
 
+### Display: lower render resolution (2026-10-25)
+
+The user asked to cut the render resolution below the Note 8's native
+1440x2960, to make the GPU-less, software-rendered UI more tolerable.
+Reading the code (no phone work yet) found two things:
+
+- **Observation (source only): the flashed 4 GiB image presents at most 10
+  times a second.** `AppleCLCD::start` defaults `sweetfb_hz` to 10 and
+  `swap()` only calls `present()` when `now - fLastPresent >= fMinGap`
+  (`26 MHz / hz` = 100 ms). The 4 GiB cmdline has no `sweetfb_hz` (log
+  `pmsg-3g8c.txt` line 20 and the image strings agree), unlike the S8 daily
+  image, which used `sweetfb_hz=60`. This is independent of the user's
+  1440x2960/1125x2436 question and may matter more for perceived
+  responsiveness. **Not measured on the phone**; the ring has no
+  `SWEET FB: ... presents` line yet.
+- The scaled-present machinery from the S8 is already in 0124: with
+  `sweetfb_native=0 sweetfb_scale=1`, `AppleCLCD` reports 1125x2436 to
+  userland, the presenter upscales it to 1367x2960 (36 px black side bars),
+  and the touch driver's `s8ts_scaled` branch maps the same layout
+  (`s8ts_report`, 0124 line ~676). `make-boot.sh` sets the ADT canvas to
+  1125x2436 unless the args contain `sweetfb_native=1`; the canvas must
+  equal the presented size (boot 18 stalled otherwise). `sweetfb_dpp=1`
+  (hardware VGF0 scaler) is built but has **never been run on either phone**.
+
+- **Built, not flashed:** `shim/dreamlte/out/greatlte-4g-8core-scale-boot.img`,
+  **16 975 888 bytes**, SHA-256
+  `3b9ddab0761d81ced107625101adeef3236d00ebfd7ed2ea192d4c1ac65f6fcc`.
+  Same 0126 kernel (`/tmp/ci-0126/kernel.development.a5xelte`,
+  `50042ca4…1f8d47`) and `S8_DRAM_MIB=4096`; only the cmdline and ADT canvas
+  differ from the flashed image. Embedded cmdline (375 bytes):
+  the previous one with `sweetfb_native=0 sweetfb_scale=1 sweetfb_hz=60`
+  (everything after `a5fb_noconsole=1` unchanged; `s8tspause=40
+  s8tsprobe=20 s8tsdebug=8` kept for touch). ADT checks: `dram-base
+  0x880000000`, `dram-size 0x100000000`, `display-scale 3`,
+  `canvas-width 1125`, `canvas-height 2436`.
+  Expected, if it works: iOS lays out 375x812 pt at 3x (iPhone X) instead of
+  480x987 pt, the software renderer fills 64 % of the pixels, and the panel
+  gets up to 60 presents/s (one presenter thread, ~15 ms/frame CPU upscale
+  measured on the S8 in p9). Untested on the Note 8.
+
 ## Open work
 
 1. Note 8 (greatlte) touch: **works in iOS, then wedges after a few minutes of
