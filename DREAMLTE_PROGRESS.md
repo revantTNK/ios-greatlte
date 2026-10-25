@@ -1559,12 +1559,19 @@ TWRP's pmsg zone still held the dead kernel's console tail.
     phys_base)) >> 21`. Our loader puts the header at `0x881004000`, so at
     4 GiB that is 2039 entries covering L1 entries 34-37.
     `create_bootstrap_mapping` takes a fresh 4 KiB L2 page for every L1 entry
-    it crosses, once for the V=P map and once for the KVA map: **2 L1 + 8 L2
-    = 10 pages**. `BOOTSTRAP_TABLE_SIZE` is `ARM_PGBYTES * 8` here (our build
-    has no `ARM_LARGE_MEMORY`, no KTRR/CTRR), so the last two pages are
-    written **past the array**. At 2 GiB the same arithmetic gives 1015
-    entries over L1 entries 34-35 = 6 pages, which is why 2 GiB has always
-    booted.
+    it crosses, once for the V=P map and once for the KVA map, **plus one
+    more for the dreamlte framebuffer mapping** (patch 0124 maps the DECON
+    scanout `0xcc000000` VA=PA with `A5_FB_2M_BLOCKS 9` blocks; its L1 index
+    differs from isolated XNU RAM, so it cannot share an L2 page). Total:
+    **2 L1 + 2x(entries) L2 + 1 fb = 11 pages at 4 GiB**, 9 at 3 GiB, 7 at
+    2 GiB. `BOOTSTRAP_TABLE_SIZE` is `ARM_PGBYTES * 8` here (our build has no
+    `ARM_LARGE_MEMORY`, no KTRR/CTRR), proven by `llvm-nm` on the old CI
+    kernel: `_bootstrap_pagetables 0xfffffff00717a000`, `_avail_end
+    0xfffffff007182000` - exactly 8 x 4096 bytes apart. So every size above
+    2 GiB writes past the array; 2 GiB (7 pages) is the old kernel's exact
+    ceiling, which is why it has always booted. (The first count here
+    omitted the framebuffer page and predicted 3 GiB fits - the 3 GiB boot
+    below falsified it; this is the corrected count.)
   - The victims are in `__DATA_CONST` right after the array, verified with
     `llvm-nm` on the CI kernel: page `0xfffffff007182000` holds
     `_avail_end`, `_real_avail_end`, `_first_avail`, `_vm_kernel_slide`,
@@ -1581,25 +1588,49 @@ TWRP's pmsg zone still held the dead kernel's console tail.
     (`arm_vm_init.c`, "BOOTSTRAP_TABLE_SIZE too small for memory config")
     is a units bug: it compares a page count (`pages_used`, 10) against a
     byte count (`BOOTSTRAP_TABLE_SIZE`, 32 768), so it can never fire.
-  - **Fix written:** `xnu/patches/0126-dreamlte-4g-bootstrap-tables.patch`
+  - **Fix written and built:** `xnu/patches/0126-dreamlte-4g-bootstrap-tables.patch`
     (mirrored in `tools/dreamlte/apply-dreamlte.py`) raises
     `BOOTSTRAP_TABLE_SIZE` to the `ARM_LARGE_MEMORY` bound (34 pages, up to
     16 GiB of 1 GiB entries) and makes the check compare bytes. Patch
-    applies cleanly to a pristine xnu-8796.141.3 tree (`git apply --check`);
-    **kernel not yet built**.
-  - **3 GiB image flashed as the confirmation test (2026-10-25):** 3072 MiB
-    needs exactly 8 pages (map ends `0x93fe04000`, three L1 entries), so it
-    should boot with the *current* kernel (CI 40139011852, unpatched) - a
-    no-CI confirmation of the arithmetic, and 1 GiB more than we run now.
-    3200 MiB (3.125 GiB) is the first size that overflows. Image
-    `shim/dreamlte/out/greatlte-3g-8core-boot.img`, **16 861 200 bytes**,
-    SHA-256
-    `fe210fc0ea6179735343ad6668dbaf2f334d6932cfed7f25ec114affe7d4cd73`.
-    Flashed to BOOT `sda7` over the 4 GiB image (`3a568a86…a3e0`): on-phone
-    hash matched, `dd` rc=0, `sync` rc=0, read-back identical. **Built,
-    flashed, not yet booted.** A boot should show about 193 000 free pages
-    at `vm_page_bootstrap:` (3 GiB at 16 KiB) and 8/8 CPUs; a panic with no
-    ring would mean the overflow is not the whole story.
+    applies cleanly to a pristine xnu-8796.141.3 tree (`git apply --check`).
+    **Built: CI run 40189987396** (workflow_dispatch) **succeeded** in 8m3s;
+    artifact kernel `kernel.development.a5xelte`, 17 243 960 bytes, SHA-256
+    `50042ca4c67a95b96672e87477bac9a7001c9977883aafd5601d2649013f8d47`
+    (matches the artifact `SHA256SUMS`). `llvm-nm`: `_bootstrap_pagetables
+    0xfffffff00717a000`, `_topology_info 0xfffffff00719c5e8` - the 34-page
+    (0x22000-byte) table now covers everything the overflow used to hit.
+  - **3 GiB confirmation test (2026-10-25) - panicked pre-console, as the
+    corrected count predicts.** The 3 GiB image
+    `greatlte-3g-8core-boot.img` (`fe210fc0…7d4cd73`, old unpatched kernel,
+    CI 40139011852) was flashed over the 4 GiB one and booted by the user:
+    **kernel panic** (screen photo ends at `A5 XNU STAGE 7: entering
+    arm_vm_init`, green `JUMP TO XNU` above it - stage 7 is the last visible
+    mark by design). Logs pulled in TWRP confirm the same death shape as
+    4 GiB: `logs/pmsg-3g8c.txt` shows the full loader run with
+    `phys=0x880000000 mem=0xc0000000` (3072 MiB) through
+    `JUMP TO XNU`, and nothing after; `logs/sweetlog-3g8c.txt` is
+    **stale** - it is the last successful 2 GiB 8-core boot (flush #51,
+    02:32, `vm_page_bootstrap: 127919 free pages` = 2 GiB at 16 KiB), so the
+    3 GiB XNU never reached `klog_init()`. At 3 GiB the 9th bootstrap table
+    page lands exactly on `_avail_end`/`_real_avail_end` +
+    `_vm_kernel_stext`/`_vm_kernel_slid_base` and friends
+    (`0xfffffff007182000`+): `arm_vm_init` reads `segLOWESTAuxKC != segLOWEST`
+    (panics), `vm_kernel_slid_*` before `arm_slide_rebase` re-derives them
+    from `seg*`, and `lowmem_vectors` uses `vm_kernel_stext` as an address.
+    So the 3 GiB run died in `arm_vm_init`, before any console - matching
+    the photo. The old "3 GiB needs 8 pages, should boot" prediction is
+    **falsified**; 3 GiB needs 9 (the framebuffer page is the missing one).
+  - **Fixed 4 GiB image built and verified, not yet flashed:** CI 40189987396
+    kernel (`50042ca4…1f8d47`), `S8_DRAM_MIB=4096`, the same `cpus=8`
+    cmdline. Image `shim/dreamlte/out/greatlte-4g-8core-0126-boot.img`,
+    **16 975 888 bytes**, SHA-256
+    `db3a5f8a97eb06d1fd99eb139225416b496a5e67a95654ad7594e82bc3839b5f`.
+    Checks: payload `SWEETXNU` v1, `virt 0xfffffff006000000`,
+    `entry 0xfffffff007444488`, `phys 0x880000000`, `mem 0x100000000`
+    (4096 MiB), window `[0x880000000, 0x980000000)`; entry PA
+    `0x881444488`; 10 segments `0x881004000…0x882500000+0x3b5f38`;
+    `adt_pa 0x8828b8000`, `boot_args 0x8828bb000`; embedded cmdline is the
+    `cpus=8` one, 355 bytes.
 - **What a boot should show:** `vm_page_bootstrap:` about 258 000-262 000
   free pages (4 GiB at 16 KiB pages, versus 127 919 at 2 GiB), the
   `S8 KMEM:` claims line roughly unchanged (hole a little smaller because
@@ -1665,11 +1696,17 @@ TWRP's pmsg zone still held the dead kernel's console tail.
    and does the new Mongoose order start core 0x000?
 3. Mongoose: **8/8 boots and works** (`cpus=8`, ring
    `logs/sweetlog-8core.txt`, 1066 MHz per Mongoose core). 4 GiB + 8 cores
-   first panicked before the console; the cause is found in the source (the
-   bootstrap page tables are 8 pages, a 4 GiB window needs 10 - see "RAM to
-   4 GiB on the Note 8") and patch 0126 is written but **not yet built or
-   booted**. Open: build the 0126 kernel, boot 4 GiB, and (optionally) boot
-   the ready 3 GiB image as a no-CI confirmation. Then L2/non-CPU power, the
+   first panicked before the console; the 3 GiB confirmation image
+   **panicked the same way (pre-console)**, which - with the corrected
+   count including the framebuffer's extra L2 page - confirms the
+   bootstrap-table overflow as the cause at every size above 2 GiB (7
+   pages needed at 2 GiB, 9 at 3 GiB, 11 at 4 GiB, against an 8-page
+   table). **Patch 0126 is built** (CI 40189987396, kernel
+   `50042ca4…1f8d47`) and the fixed 4 GiB image
+   `greatlte-4g-8core-0126-boot.img` (`db3a5f8a…839b5f`) is **built,
+   verified, not yet flashed**. Open: flash it, boot 4 GiB (expect ~258
+   000-262 000 free pages, 8/8 CPUs). If it still dies pre-console, build a
+   3 GiB image with the 0126 kernel as the fallback. Then L2/non-CPU power, the
    A53 clock (1689 MHz worked in c10; daily setting 1690/1703) and GPU.
    Multi-range physical memory (the two low GiB) would need pmap work and is
    not planned yet.
