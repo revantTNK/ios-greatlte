@@ -1671,8 +1671,13 @@ TWRP's pmsg zone still held the dead kernel's console tail.
     `cpus=8` one, 355 bytes. Pushed to TWRP, on-phone `sha256sum` matched,
     written to BOOT `sda7` with `dd bs=1048576 conv=fsync`, `sync`, and
     the read-back hash matched (`dd | head -c 16975888 | sha256sum`).
-    Pre-flash `sda7` hash was `84d7435b…b0e9d` (the 3 GiB image). **Boot
-    result not yet observed** - the user is about to reboot into it.
+    Pre-flash `sda7` hash was `84d7435b…b0e9d` (the 3 GiB image).
+    **Boot result (reported by the user, 2026-10-25): no kernel panic, iOS
+    boots and runs at 4 GiB.** Touch wedged again as usual (it revives on
+    its own after an idle soak, per the earlier 8-core boot). Not yet
+    verified: the `vm_page_bootstrap:` free-page count and `8/8 CPUs`
+    line - the ring has not been pulled, since pulling it needs a TWRP
+    reboot. That is the first thing to capture on the next TWRP visit.
 - **What a boot should show:** `vm_page_bootstrap:` about 258 000-262 000
   free pages (4 GiB at 16 KiB pages, versus 127 919 at 2 GiB), the
   `S8 KMEM:` claims line roughly unchanged (hole a little smaller because
@@ -1751,10 +1756,12 @@ TWRP's pmsg zone still held the dead kernel's console tail.
    4 GiB, against an 8-page table). **Patch 0126 is built** (CI 40189987396,
    kernel `50042ca4…1f8d47`) and the fixed 4 GiB image
    `greatlte-4g-8core-0126-boot.img` (`db3a5f8a…839b5f`) is **flashed to
-   BOOT `sda7`** (2026-10-25, read-back hash identical). Open: boot it 4
-   GiB (expect ~258 000-262 000 free pages, 8/8 CPUs) and pull the ring.
-   If it still dies pre-console, build a 3 GiB image with the 0126 kernel as
-   the fallback. Then L2/non-CPU power, the
+   BOOT `sda7`** (2026-10-25, read-back hash identical) and **it boots:
+   no panic, iOS runs at 4 GiB with 8 cores** (user report; free-page
+   count and `8/8 CPUs` line still to be pulled from the ring). The RAM
+   thread is done unless the ring shows less than expected. Next is
+   display scaling (lower render resolution) for UI responsiveness, then
+   L2/non-CPU power, the
    A53 clock (1689 MHz worked in c10; daily setting 1690/1703) and GPU.
    Multi-range physical memory (the two low GiB) would need pmap work and is
    not planned yet.
