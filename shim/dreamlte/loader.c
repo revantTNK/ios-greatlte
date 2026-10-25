@@ -21,7 +21,7 @@
 #include "pmic.h"
 #include "display_probe.h"
 
-#define UFS_PROBE_DMA		0x8f0000000UL	/* high bank; inside XNU's RAM at 2 GiB */
+#define UFS_PROBE_DMA		0x8f0000000UL	/* high bank; inside XNU's RAM from 2 GiB up */
 #define UFS_PROBE_DMA_SIZE	0x14000UL	/* ufs_probe.c D_SIZE */
 
 /* ---- board facts (s8-probe v2-v7, live DT, /proc/iomem) ---- */
@@ -37,8 +37,11 @@
 #define XNU_MARKER_PHYS		0x920ff000UL	/* A5_ENTRY_MARKER_PHYS in 0124 */
 #define LOW_RAM_BASE		0x80000000UL	/* initrd must be in the low bank */
 #define LOW_RAM_END		0xbc800000UL
-#define XNU_RAM_BASE		0x880000000UL	/* 2 GiB high bank */
-#define XNU_RAM_END		0x900000000UL
+/* The high DRAM bank: 0x880000000-0x97fffffff (4 GiB) on the Note 8,
+ * 0x880000000-0x8ffffffff (2 GiB) on the S8 - the only range free of
+ * firmware carve-outs, so XNU's single contiguous window lives here. */
+#define XNU_RAM_BASE		0x880000000UL
+#define XNU_RAM_END		0x980000000UL
 #define PAGE_SIZE		4096UL
 #define BOOT_LINE_LENGTH	608
 
@@ -597,8 +600,8 @@ uint64_t dl_main(uintptr_t dtb, uint64_t el, uint64_t sctlr)
 	}
 	out("\n");
 	ufs_probe(kv, out, UFS_PROBE_DMA);
-	/* With 2 GiB for XNU (S8_DRAM_MIB) the probe's DMA area lies inside
-	 * XNU's RAM, which was zeroed above; zero it again. */
+	/* With 2 GiB or more for XNU (S8_DRAM_MIB) the probe's DMA area lies
+	 * inside XNU's RAM, which was zeroed above; zero it again. */
 	if (UFS_PROBE_DMA >= p->phys_base && UFS_PROBE_DMA + UFS_PROBE_DMA_SIZE <= mem_end) {
 		zero(UFS_PROBE_DMA, UFS_PROBE_DMA_SIZE);
 		clean(UFS_PROBE_DMA, UFS_PROBE_DMA + UFS_PROBE_DMA_SIZE);

@@ -17,7 +17,8 @@ mkdir -p "$work"
 # The ADT canvas must match the size the kernel presents (SweetFramebuffer).
 canvas=1125x2436
 [[ " $args " == *" sweetfb_native=1 "* ]] && canvas=1440x2960
-# S8_DRAM_MIB: RAM for XNU (default 512, at most 2048; tools/mkadt_dreamlte.py).
+# S8_DRAM_MIB: RAM for XNU (default 512, at most 4096 - the whole high DRAM
+# bank on the Note 8, 2048 on the S8; tools/mkadt_dreamlte.py).
 python3 "$repo/tools/mkadt_dreamlte.py" "$work/dreamlte.adt" --canvas "$canvas" --dram-mib "${S8_DRAM_MIB:-512}"
 python3 "$repo/tools/mkpayload.py" "$kernel" "$work/dreamlte.adt" "$work/payload.bin" --cmdline "$args"
 bash "$repo/shim/dreamlte/build.sh" "$stock" "$work/payload.bin" "$out"

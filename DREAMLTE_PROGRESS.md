@@ -1465,6 +1465,89 @@ TWRP's pmsg zone still held the dead kernel's console tail.
   read-back of 16 861 200 bytes hashed `9ebd6555…5d0b`, identical. **Not yet
   booted** - the phone is still in TWRP, waiting for a reboot.
   To go back: reflash `greatlte-ts-buskick-boot.img` (`d4091780…6140`).
+- **Observation (8-core boot, 2026-10-25):** eight cores work in iOS. Ring
+  `logs/sweetlog-8core.txt` (pulled in TWRP, 195 965 bytes, flush #51,
+  3750 lines):
+  ```
+  A5XELTE CPU: cpu=4 CPU_ON target=0x0 entry_pa=0x88142a000 context=4
+  A5XELTE CPU: cpu=4 mpidr=0x0 entry 0x88142a000 via 0x8f000000, GICD_CTLR 0x1
+  A5XELTE CPU: cpu=4 PSCI CPU_ON rc=0
+  A5XELTE CPU: cpu=4 mpidr=0x0 came alive; SGI1 OK; 1066 MHz
+  ... cpu=5/6/7 the same with mpidr=0x1/0x2/0x3 ...
+  A5XELTE CPU: 8/8 CPUs initialized, SGI1 verified
+  ```
+  A53s at 1052-1053 MHz, the four Mongoose cores at 1066 MHz each, one
+  PSCI CPU_ON per core through the trampoline at `0x88142a000` reached via
+  `0x8f000000`, `GICD_CTLR 0x1`. No panic, `vm_page_bootstrap: 127919`
+  free 16 KiB pages = 2 GiB. **User report:** the phone is noticeably
+  faster and animations a little smoother.
+- **Observation (touch, same 8-core boot):** the wedge happened again and
+  the ladder did exactly what it did on the bus-kick boot - `event read
+  failed (1..8)`, `probe (32)` failed, `probe (64)` failed, `wedge (64)`
+  dump (identical registers, `dat 0xf2`), `bus kick: dat 0xf2, after dat
+  0xf3`, `probe (64): ts status 00 02 01 00` / `id22 5345b66100`, `event
+  overflow (left 63), clearing stack`. After that the ring has **no further
+  touch error at all** for the remaining ~650 lines, while the system kept
+  running (one `CRASH assetsd sig 6` report is unrelated to touch).
+  **User report:** after the phone was left alone for a while, **the
+  touchscreen started working again by itself** - the first wedge that
+  cleared without a reboot or a reflash.
+- **Reading (part observation, part guess):** the kick restores the bus
+  every time it has run; what does not come back immediately is the IC's
+  event path (`left 63` overflow cleared once, then silence). The fact that
+  it recovers on its own after idle rules out an electrically dead IC or a
+  permanently stuck bus - guess: the IC's firmware/event engine is stuck
+  processing something and times out or finishes once the host stops
+  hammering it, after which normal polling finds events again. It also
+  means "touch died" in a session need not be permanent: leaving it idle is
+  currently a workaround.
+
+### RAM to 4 GiB on the Note 8 (2026-10-25)
+
+- **Observation (`/proc/iomem` read in TWRP, 2026-10-25):** the Note 8 has
+  three System RAM ranges - `80000000-bc7fffff` (1 GiB),
+  `c0000000-ffffffff` (1 GiB) and `880000000-97fffffff` (**4 GiB**);
+  `MemTotal 5 497 624 kB`, `MemFree 5 126 732 kB`. The high bank is twice
+  the S8's 2 GiB (`880000000-8ffffffff`), so the 4096 MiB ceiling in
+  `tools/mkadt_dreamlte.py` was ours, not the hardware's.
+- **Why 4 GiB and not 6:** XNU takes one contiguous physical range from the
+  ADT. The two low GiB hold firmware carve-outs (ramoops, sec_debug, modem,
+  abox, TIMA, framebuffer) and are not free; the high bank is. 4096 MiB is
+  therefore the whole usable window, and the "only a third of 6 GiB" number
+  is the low bank, not something we can hand to XNU without multi-range
+  pmap support.
+- **Changed:** `tools/mkadt_dreamlte.py` `DRAM_BANK_MIB` 2048 -> 4096 (and
+  the bank comments now name both phones); `shim/dreamlte/loader.c`
+  `XNU_RAM_END` `0x900000000` -> `0x980000000` (the payload bounds check and
+  the RAM zeroing both use it); comment fixes in `make-boot.sh` and at the
+  UFS probe DMA area. No kernel change: `vm_compression_limit=262144`
+  (4 GiB at 16 KiB pages) already caps the compressor pool, so the static
+  kmem claims stay ~30.6 GiB against a ~44 GiB `kernel_map` hole even
+  though the pool would otherwise be 16 x 4 GiB = 64 GiB.
+- **Built and verified (2026-10-25), not yet booted:** same CI 40139011852
+  kernel (`213fe099…0e6d`), `S8_DRAM_MIB=4096`, the same `cpus=8` cmdline.
+  Image `shim/dreamlte/out/greatlte-4g-8core-boot.img`, **16 861 200
+  bytes**, SHA-256
+  `3a568a866a2095f3eedc40686d0d58e620b2d64163f59c1d3c09e03379b4a3e0`.
+  Checks: payload at file offset `0x11000` byte-identical to `payload.bin`;
+  `SWEETXNU` v1; `phys_base 0x880000000`, `mem_size 0x100000000` (4096
+  MiB); ADT `dram-base 0x880000000`, `dram-size 0x100000000`; `cpus=8` in
+  the embedded cmdline and no `cpus=4`; loader rebuilt after the
+  `XNU_RAM_END` edit (`out/Image` 66 848 bytes, 50 s after the source).
+- **Flashed 2026-10-25** (TWRP, serial `988d…13230`): on-phone hash matched
+  `3a568a86…79b4a3e0`; pre-flash `sda7` read `9ebd6555…5d0b` (the 8-core
+  2 GiB image); `dd` 16+1 records, rc=0, `sync` rc=0; read-back of
+  16 861 200 bytes hashed `3a568a86…79b4a3e0`, identical. **Not yet
+  booted.**
+- **What a boot should show:** `vm_page_bootstrap:` about 258 000-262 000
+  free pages (4 GiB at 16 KiB pages, versus 127 919 at 2 GiB), the
+  `S8 KMEM:` claims line roughly unchanged (hole a little smaller because
+  the identity physmap grows with RAM), `8/8 CPUs initialized, SGI1
+  verified`, and the touch `boot regs (0)` lines. If it panics in
+  `kmem_range_init` (like the pre-`vm_compression_limit` 2 GiB boots), the
+  panic is before the console exists - recover with the key combo, pull
+  nothing (there will be no new ring), and reflash
+  `greatlte-ts-8core-boot.img` (`9ebd6555…5d0b`).
 
 ## Open work
 
@@ -1505,9 +1588,11 @@ TWRP's pmsg zone still held the dead kernel's console tail.
    identical to the healthy boot baseline except `trans` and SDA-low, the
    **bus kick raised SDA (`dat 0xf2` -> `0xf3`) and the next probe answered**,
    but the IC produced no further touch events. Details in "SYSREG image
-   boots clean". The current BOOT is being switched to the 8-core image
-   (next section); the bus-kick image can be flashed back to continue touch.
-   Note that
+   boots clean". The 8-core boot repeated the same pattern and then **touch
+   came back by itself after the phone was left idle**. Next lever for touch
+   is therefore the IC's event path after a kick (force
+   `SEC_TS_CMD_CLEAR_EVENT_STACK`, and if that fails an IC software reset),
+   not the PMIC rail cycle. Note that
    `logs/sweetlog-busfix.txt` predates the flash (it is an old-kernel boot;
    see the correction above).
    The 2 GiB RAM question is closed: `greatlte-ts-overflow-2g-cmp-boot.img`
@@ -1517,9 +1602,12 @@ TWRP's pmsg zone still held the dead kernel's console tail.
    512 MiB image is `greatlte-ts-overflow-boot.img` (`82db76be...a123e4fcec`).
 2. Boot the latest kernel/loader: does the frame-done copy remove the tearing,
    and does the new Mongoose order start core 0x000?
-3. Mongoose: 8/8 already initialised in K2c/K2d; the current image returns
-   to `cpus=8` (built, see "Eight cores again"). Then L2/non-CPU power and
-   the A53 clock (1689 MHz worked in c10; daily setting 1690/1703).
+3. Mongoose: **8/8 boots and works** (`cpus=8`, ring
+   `logs/sweetlog-8core.txt`, 1066 MHz per Mongoose core). BOOT now carries
+   4 GiB + 8 cores ("RAM to 4 GiB on the Note 8"), not yet booted. Then
+   L2/non-CPU power, the A53 clock (1689 MHz worked in c10; daily setting
+   1690/1703) and GPU. Multi-range physical memory (the two low GiB) would
+   need pmap work and is not planned yet.
 4. Zero-copy scanout through the DPU IDMA (needs the SFR update to take effect).
 5. Vibration, backlight, Wi-Fi (BCM4361).
 6. Housekeeping: `NOTES.md` and `A5XELTE_PROGRESS.md` moved to `docs/history/` as donor history.

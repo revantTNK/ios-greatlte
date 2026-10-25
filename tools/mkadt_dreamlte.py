@@ -21,12 +21,16 @@ import adt
 import mkadt
 
 DRAM_BASE = 0x880000000
-# 512 MiB, the A5XELTE-proven size: with the whole 2 GiB bank the first S8
-# boot panicked in kmem_range_init (kernel VA claims in the 39-bit 4K layout).
-# --dram-mib tries more; the bank ends at 0x900000000 (2048 MiB). XNU takes
-# one contiguous range, so the two low banks (0x80000000, 0xc0000000) stay out.
+# 512 MiB, the A5XELTE-proven size: with the whole bank the first S8 boot
+# panicked in kmem_range_init (kernel VA claims in the 39-bit 4K layout, fixed
+# by capping the compressor pool with vm_compression_limit).
+# --dram-mib tries more; the bank ends where the DRAM decoders stop:
+# 0x980000000 (4096 MiB) on the Note 8 (greatlte, /proc/iomem
+# "880000000-97fffffff"), 0x900000000 (2048 MiB) on the S8 (dreamlte,
+# "880000000-8ffffffff"). XNU takes one contiguous range, so the two low
+# banks (0x80000000, 0xc0000000) and their firmware carve-outs stay out.
 DRAM_SIZE = 0x20000000
-DRAM_BANK_MIB = 2048
+DRAM_BANK_MIB = 4096
 FB_PHYS, FB_W, FB_H = 0xcc000000, 1440, 2960
 TIMEBASE = 26000000
 
@@ -143,7 +147,8 @@ if __name__ == '__main__':
     parser.add_argument('--canvas', default=f'{FB_W}x{FB_H}',
                         help='display size presented to iOS, WxH')
     parser.add_argument('--dram-mib', type=int, default=DRAM_SIZE >> 20,
-                        help=f'RAM given to XNU from {DRAM_BASE:#x}, at most {DRAM_BANK_MIB}')
+                        help=f'RAM given to XNU from {DRAM_BASE:#x}, at most '
+                             f'{DRAM_BANK_MIB} (Note 8; the S8 bank is 2048)')
     args = parser.parse_args()
     if not 0 < args.dram_mib <= DRAM_BANK_MIB:
         parser.error(f'--dram-mib must be 1..{DRAM_BANK_MIB}')
