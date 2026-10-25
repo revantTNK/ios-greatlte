@@ -1587,14 +1587,19 @@ TWRP's pmsg zone still held the dead kernel's console tail.
     16 GiB of 1 GiB entries) and makes the check compare bytes. Patch
     applies cleanly to a pristine xnu-8796.141.3 tree (`git apply --check`);
     **kernel not yet built**.
-  - **3 GiB image built, not flashed:** 3072 MiB needs exactly 8 pages (map
-    ends `0x93fe04000`, three L1 entries), so it should boot with the
-    *current* kernel - a free confirmation of the arithmetic before spending
-    a CI run, and 1 GiB more than we run now. 3200 MiB (3.125 GiB) is the
-    first size that overflows. Image
+  - **3 GiB image flashed as the confirmation test (2026-10-25):** 3072 MiB
+    needs exactly 8 pages (map ends `0x93fe04000`, three L1 entries), so it
+    should boot with the *current* kernel (CI 40139011852, unpatched) - a
+    no-CI confirmation of the arithmetic, and 1 GiB more than we run now.
+    3200 MiB (3.125 GiB) is the first size that overflows. Image
     `shim/dreamlte/out/greatlte-3g-8core-boot.img`, **16 861 200 bytes**,
     SHA-256
     `fe210fc0ea6179735343ad6668dbaf2f334d6932cfed7f25ec114affe7d4cd73`.
+    Flashed to BOOT `sda7` over the 4 GiB image (`3a568a86…a3e0`): on-phone
+    hash matched, `dd` rc=0, `sync` rc=0, read-back identical. **Built,
+    flashed, not yet booted.** A boot should show about 193 000 free pages
+    at `vm_page_bootstrap:` (3 GiB at 16 KiB) and 8/8 CPUs; a panic with no
+    ring would mean the overflow is not the whole story.
 - **What a boot should show:** `vm_page_bootstrap:` about 258 000-262 000
   free pages (4 GiB at 16 KiB pages, versus 127 919 at 2 GiB), the
   `S8 KMEM:` claims line roughly unchanged (hole a little smaller because
