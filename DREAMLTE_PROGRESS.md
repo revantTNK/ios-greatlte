@@ -1717,7 +1717,8 @@ Reading the code (no phone work yet) found two things:
   equal the presented size (boot 18 stalled otherwise). `sweetfb_dpp=1`
   (hardware VGF0 scaler) is built but has **never been run on either phone**.
 
-- **Built, not flashed:** `shim/dreamlte/out/greatlte-4g-8core-scale-boot.img`,
+- **Built and flashed (2026-10-25, user approved):**
+  `shim/dreamlte/out/greatlte-4g-8core-scale-boot.img`,
   **16 975 888 bytes**, SHA-256
   `3b9ddab0761d81ced107625101adeef3236d00ebfd7ed2ea192d4c1ac65f6fcc`.
   Same 0126 kernel (`/tmp/ci-0126/kernel.development.a5xelte`,
@@ -1732,6 +1733,18 @@ Reading the code (no phone work yet) found two things:
   480x987 pt, the software renderer fills 64 % of the pixels, and the panel
   gets up to 60 presents/s (one presenter thread, ~15 ms/frame CPU upscale
   measured on the S8 in p9). Untested on the Note 8.
+
+  Flashed to BOOT `sda7` from TWRP 3.4.0 (serial `988d…13230`): pushed
+  hash matched `3b9ddab0…6fcc`, pre-flash `sda7` prefix hash was
+  `db3a5f8a…839b5f` (the previous 4 GiB image), `dd bs=1048576 conv=fsync`,
+  `sync`, read-back hash identical. Boot result **not yet reported**.
+- **The ring from the previous 4 GiB native boot is gone.** TWRP's
+  `/sys/fs/pstore/` was empty (no `pmsg-ramoops-0`), so the
+  `vm_page_bootstrap:` count and `8/8 CPUs` line could not be pulled.
+  This matches the warning above: at 4 GiB both klog zones sit inside
+  XNU's RAM window and are ordinary memory once the VM allocator runs.
+  The 4 GiB free-page count therefore has no ring evidence; the boot
+  itself is the user's report.
 
 ## Open work
 
