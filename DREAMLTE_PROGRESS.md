@@ -1368,13 +1368,47 @@ TWRP's pmsg zone still held the dead kernel's console tail.
   01:48 +03** with the user's approval (phone `greatlte` in TWRP, serial
   `988d…13230`): on-phone SHA-256 matched, the pre-flash `sda7` read was
   `5bac7657…9dd52` (the sysreg image), `dd` 16+1 records, rc=0, `sync`, and
-  the 16 861 200-byte read-back hashed `d4091780…6140`, identical. **Boot
-  result not observed yet.** After boot, the ring
-  should carry `S8 TOUCH: boot regs (0): …` at bring-up and, at a wedge,
-  `bus kick: dat … , after dat …` plus `bus recover (N): … dat …`. `after
-  dat` with bit 0 set (0x2/0x3) means the bus cleared and `s8ts_probe_ic()`
-  succeeding means touch is back; bit 0 clear means something still holds
-  SDA and the PMIC rail cycle is next.
+  the 16 861 200-byte read-back hashed `d4091780…6140`, identical.
+- **Observation (user report, 2026-10-25, ring not pulled yet):** the bus-kick
+  boot reaches iOS and **touch stayed working much longer than on the sysreg
+  boot** before wedging again; the wedge came while the user was editing apps
+  on the homescreen. Which of the three changes mattered (or whether it was
+  the 100 ms INT_STATUS wait) is not known without the ring; the wedge may
+  also have run the kick and failed, which only the log can say. Treat the
+  longer uptime as a report, not yet a measurement.
+- **Guess:** the 20 ms abort was part of it - a transfer aborted at 20 ms
+  leaves SDA low exactly as dumped - so raising the wait removes some
+  wedges, while the ones during sustained touch input (event/firmware work)
+  still exceed 100 ms or crash the IC. The PMIC rail cycle is the next lever.
+- **When the ring is pulled, look for:** `boot regs (0)` vs `wedge (N)`
+  (any field that differs), and whether `bus kick: … after dat 0x…` has bit
+  0 set and whether the following `probe` answers.
+
+### Eight cores again (2026-10-25)
+
+- Eight cores are not new work: K2c (2026-10-22, CI 39770480628) reached
+  `8/8 CPUs initialized, SGI1 verified` with `cpus=8`, and K2d measured both
+  clusters at ~1.05 GHz; a 20-minute soak ran on eight cores. The images
+  built for touch and the 2 GiB RAM work reused a `cpus=4` cmdline, so every
+  boot since has been four A53s. The 0124 patch still carries the whole
+  8-core path (SweetCPU matching `samsung,mongoose-m2`, GICD_CTLR bit 0,
+  one PSCI CPU_ON per core through the trampoline).
+- **Built 2026-10-25, not yet booted:** `cpus=8` (same 355-byte cmdline
+  otherwise, `cpus=4` -> `cpus=8`), same CI 40139011852 kernel
+  (`213fe099…0e6d`), `S8_DRAM_MIB=2048`. Image
+  `shim/dreamlte/out/greatlte-ts-8core-boot.img`, **16 861 200 bytes**,
+  SHA-256
+  `9ebd6555f19a615bce9dcda325e981bc3cb279e8ac8ae72e146a16b6c56b5d0b`.
+  Checks: payload byte-identical to `payload.bin` at file offset `0x11000`,
+  `SWEETXNU` v1, 10 pieces, entry `0xfffffff007428488`, `phys 0x880000000`,
+  `mem 0x80000000`, and `debug=0xc serial=3 cpus=8 …` present in the embedded
+  cmdline. No kernel or loader rebuild was needed: the cmdline is the only
+  difference from the flashed bus-kick image.
+- **What a boot should show:** `8/8 CPUs initialized, SGI1 verified`, one
+  `CPU: cpu=4..7 mpidr=0x0..0x3 … GICD_CTLR 0x1` line per Mongoose core,
+  and the touch `boot regs (0)` lines unchanged. If it panics at a ticket
+  lock like K2b did before the pset fix, the image in `sda7` is still the
+  bus-kick one and can be restored.
 
 ## Open work
 
@@ -1408,11 +1442,15 @@ TWRP's pmsg zone still held the dead kernel's console tail.
    and stays dead - the dump shows SDA held low, INT_STATUS 0 and the IC IRQ
    asserted, and the old recover changed nothing. The bus clear, 100 ms waits
    and boot-time register baseline described in "SYSREG image boots clean,
-   touch still wedges" are in the tree but **not built or booted yet**; next
-   step is CI, then flashing that kernel to BOOT `sda7` with user approval and
-   reading `bus kick: dat … , after dat …` / `boot regs (0): …` against
-   `wedge (N): …` in the ring. Note that `logs/sweetlog-busfix.txt`
-   predates the flash (it is an old-kernel boot; see the correction above).
+   touch still wedges" were built (CI 40139011852) and **flashed to BOOT
+   `sda7`** (`greatlte-ts-buskick-boot.img`, `d4091780…6140`, read back
+   identical). **First boot (user report):** touch lasted much longer, then
+   wedged while editing apps on the homescreen; the ring has not been pulled,
+   so `boot regs` / `bus kick` / `after dat` are still unread. The current
+   BOOT is being switched to the 8-core image (next section); the bus-kick
+   image can be flashed back to continue touch. Note that
+   `logs/sweetlog-busfix.txt` predates the flash (it is an old-kernel boot;
+   see the correction above).
    The 2 GiB RAM question is closed: `greatlte-ts-overflow-2g-cmp-boot.img`
    (`8b2a9dd5...8adccded`, `vm_compression_limit=262144`) boots and shows 2 GiB
    on the phone; the 1 GiB fallback is
@@ -1420,7 +1458,9 @@ TWRP's pmsg zone still held the dead kernel's console tail.
    512 MiB image is `greatlte-ts-overflow-boot.img` (`82db76be...a123e4fcec`).
 2. Boot the latest kernel/loader: does the frame-done copy remove the tearing,
    and does the new Mongoose order start core 0x000?
-3. Mongoose: remaining cores, L2/non-CPU power, then raise the A53 clock.
+3. Mongoose: 8/8 already initialised in K2c/K2d; the current image returns
+   to `cpus=8` (built, see "Eight cores again"). Then L2/non-CPU power and
+   the A53 clock (1689 MHz worked in c10; daily setting 1690/1703).
 4. Zero-copy scanout through the DPU IDMA (needs the SFR update to take effect).
 5. Vibration, backlight, Wi-Fi (BCM4361).
 6. Housekeeping: `NOTES.md` and `A5XELTE_PROGRESS.md` moved to `docs/history/` as donor history.
