@@ -1458,6 +1458,13 @@ TWRP's pmsg zone still held the dead kernel's console tail.
   and the touch `boot regs (0)` lines unchanged. If it panics at a ticket
   lock like K2b did before the pset fix, the image in `sda7` is still the
   bus-kick one and can be restored.
+- **Flashed 2026-10-25 ~09:1x +03** (TWRP, serial `988d…13230`): on-phone
+  hash matched `9ebd6555…5d0b`; pre-flash `sda7` read `d4091780…6140` (the
+  bus-kick image, which also confirms the analysed ring in "SYSREG image
+  boots clean" came from that image); `dd` 16+1 records, rc=0, `sync` rc=0;
+  read-back of 16 861 200 bytes hashed `9ebd6555…5d0b`, identical. **Not yet
+  booted** - the phone is still in TWRP, waiting for a reboot.
+  To go back: reflash `greatlte-ts-buskick-boot.img` (`d4091780…6140`).
 
 ## Open work
 
