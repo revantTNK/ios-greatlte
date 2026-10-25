@@ -92,7 +92,7 @@ index 7ba309b..0571e4c 100644
  
  extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
  extern void thread_terminate_self(void);
-@@ -615,10 +616,975 @@ a5touch_start_early(vm_offset_t nfc, vm_offset_t alive)
+@@ -615,10 +616,990 @@ a5touch_start_early(vm_offset_t nfc, vm_offset_t alive)
  	}
  }
  
@@ -198,6 +198,10 @@ index 7ba309b..0571e4c 100644
 +#define S8TS_GATE_ON            ((1u << 21) | (1u << 20))  /* MANUAL|CG_VALUE */
 +#define S8TS_USI_V1_I2C0_1      0x3u    /* stock "hsi2c0_hsi2c1" */
 +
++/* DECON_F / IDMA0 scanout, the space the touch digitizer covers. */
++#define S8TS_PANEL_W            1440
++#define S8TS_PANEL_H            2960
++
 +static vm_offset_t s8ts_i2c, s8ts_alive, s8bat_i2c;
 +static vm_offset_t s8ts_cmu, s8ts_cmutop, s8ts_sysreg, s8ts_gpe3;
 +static unsigned s8ts_recoveries;                /* IC re-inits this boot */
@@ -206,7 +210,9 @@ index 7ba309b..0571e4c 100644
 +static unsigned s8ts_status_logged;             /* status events logged */
 +static int s8ts_sleep;
 +static int s8ts_native;         /* sweetfb_native: iOS sees the whole panel */
-+static int s8ts_scaled;         /* sweetfb_scale=1: 1125x2436 scaled to the panel height */
++static int s8ts_scaled;         /* sweetfb_scale=1: logical screen scaled to the panel */
++static unsigned s8ts_logical_w; /* sweetfb_logical_w: presented width (1125) */
++static unsigned s8ts_logical_h; /* sweetfb_logical_h: presented height (2436) */
 +static int s8ts_poll;           /* s8tspoll=1: ignore the IRQ line, poll the queue */
 +static int s8ts_raw;            /* s8tsdebug=N: log the first N raw events */
 +static bool s8ts_down[S8TS_FINGERS];
@@ -677,13 +683,20 @@ index 7ba309b..0571e4c 100644
 +		x = x * 1080 / 4096;
 +		y = y * 1920 / 4096;
 +	} else if (s8ts_scaled) {
-+		/* 1125x2436 scaled by 2960/2436 to 1367x2960, centered (36 px bars). */
-+		int px = ((int)(x * 1440 / 4096) - (1440 - 1367) / 2) * 2436 / 2960;
-+		int py = (int)(y * 2436 / 4096);
-+		px = px < 0 ? 0 : (px > 1124 ? 1124 : px);
-+		py = py < 0 ? 0 : (py > 2435 ? 2435 : py);
-+		x = (unsigned)px * 1080 / 1125;
-+		y = (unsigned)py * 1920 / 2436;
++		/* The presenter scales the logical screen to the panel height and
++		 * centers it; undo exactly that (SweetFramebuffer's out_w and x0),
++		 * so a new sweetfb_logical_w/h needs no change here. */
++		unsigned lw = s8ts_logical_w ? s8ts_logical_w : 1125;
++		unsigned lh = s8ts_logical_h ? s8ts_logical_h : 2436;
++		unsigned out_w = lw * S8TS_PANEL_H / lh;
++		int px = (int)(x * S8TS_PANEL_W / 4096) -
++		    (int)((S8TS_PANEL_W - out_w) / 2);
++		int py = (int)(y * lh / 4096);
++		px = px <= 0 ? 0 : px * (int)lw / (int)out_w;
++		px = px >= (int)lw ? (int)lw - 1 : px;
++		py = py <= 0 ? 0 : (py >= (int)lh ? (int)lh - 1 : py);
++		x = (unsigned)px * 1080 / lw;
++		y = (unsigned)py * 1920 / lh;
 +	} else {
 +		/* 1125x2436 is shown centered on the 1440x2960 panel. */
 +		int px = (int)(x * 1440 / 4096) - (1440 - 1125) / 2;
@@ -941,6 +954,8 @@ index 7ba309b..0571e4c 100644
 +	(void)PE_parse_boot_argn("s8touch", &enabled, sizeof(enabled));
 +	(void)PE_parse_boot_argn("sweetfb_native", &s8ts_native, sizeof(s8ts_native));
 +	(void)PE_parse_boot_argn("sweetfb_scale", &s8ts_scaled, sizeof(s8ts_scaled));
++	(void)PE_parse_boot_argn("sweetfb_logical_w", &s8ts_logical_w, sizeof(s8ts_logical_w));
++	(void)PE_parse_boot_argn("sweetfb_logical_h", &s8ts_logical_h, sizeof(s8ts_logical_h));
 +	(void)PE_parse_boot_argn("s8tspoll", &s8ts_poll, sizeof(s8ts_poll));
 +	(void)PE_parse_boot_argn("s8tsdebug", &s8ts_raw, sizeof(s8ts_raw));
 +	/* Scripted test input does not depend on the panel answering. */
@@ -2048,15 +2063,20 @@ index 356ff51..6dbd557 100644
  #else
  	fPhys = video.v_baseAddr;
  	fWidth = (uint32_t)video.v_width;
-@@ -184,7 +188,12 @@ AppleCLCD::start(IOService *provider)
+@@ -184,7 +188,17 @@ AppleCLCD::start(IOService *provider)
  	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
++	/* sweetfb_logical_w/h: the presented size, so a new size costs a new ADT
++	 * and boot image only, not a kernel build. Defaults: 1125x2436. */
++	unsigned logical_w = 0, logical_h = 0;
++	PE_parse_boot_argn("sweetfb_logical_w", &logical_w, sizeof(logical_w));
++	PE_parse_boot_argn("sweetfb_logical_h", &logical_h, sizeof(logical_h));
  	fLogicalW = fWidth;
  	fLogicalH = fHeight;
 -#if !defined(ARM64_BOARD_CONFIG_A5XELTE)
 +#if defined(DREAMLTE)
 +	if (!native) {
-+		fLogicalW = SWEET_FB_LOGICAL_W;
-+		fLogicalH = SWEET_FB_LOGICAL_H;
++		fLogicalW = logical_w != 0 && logical_w <= fWidth ? logical_w : SWEET_FB_LOGICAL_W;
++		fLogicalH = logical_h != 0 && logical_h <= fHeight ? logical_h : SWEET_FB_LOGICAL_H;
 +	}
 +#elif !defined(ARM64_BOARD_CONFIG_A5XELTE)
  	if (!native && fWidth <= SWEET_FB_LOGICAL_W && fHeight <= SWEET_FB_LOGICAL_H) {
