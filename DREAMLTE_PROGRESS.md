@@ -1851,6 +1851,37 @@ verified in place first). Boot outcome not yet observed.
 16 975 888 bytes, SHA-256 `db3a5f8a…839b5f` (the 4 GiB native boot that
 showed iOS).
 
+### Display: 1080x2220 boots - bigger, smoother, with a status-bar debug banner (2026-10-25)
+
+**Observation (user report, first boot of `greatlte-4g-8core-logical-boot.img`
+`6a096e69…46836`):** it boots into iOS. Everything on screen is bigger and
+the phone is smoother to use than the previous images. A solid **red bar
+spans the top of the screen, covering the clock and battery indicator**,
+showing a flushed-face emoji and the text `rdar:45025538` (screen photo
+`20261025_212718.jpg`); the lock screen behind it renders normally
+("Waiting…" plus app icons). Touch works at boot.
+
+So the 1125x2436 black screen was the size, not the scaling path: the same
+`staged present` machinery at 1080x2220 keeps SpringBoard alive. Nothing in
+the ring has been pulled for this boot yet (a TWRP reboot is needed), so the
+`SWEET FB: staged present, stage 1080x2220` line, the free-page count and
+`8/8 CPUs` for *this* image are unconfirmed - though the cmdline and ADT are
+verified (`cpus=8`, 4 GiB, canvas 1080x2220) and the previous 4 GiB boot
+measured 258 468 free pages and 8/8 CPUs.
+
+**Reading, not confirmed: the red bar is SpringBoard's unsupported-display
+debug banner.** It names an Apple Radar (`rdar:45025538`) and is drawn where
+the status bar should be, which is the shape of a fallback/misconfigured
+status-bar visual provider rather than a rendering bug of ours: 1080x2220
+(360x740 pt at 3x) matches no Apple device, while 1125x2436 was exactly the
+iPhone X that UIKit identified (`375x812@3x`). Two candidate fixes, both
+cheap to try as boot images: (a) an Apple metric that keeps the aspect close
+to the panel (e.g. 1170x2532 = iPhone 12/13 mini, `out_w = 1368`, 36 px
+side bars), which risks the same `BoundingPathBitmap` abort that killed
+1125x2436; (b) leave 1080x2220 and hide/replace the banner in userland.
+Finding the string in the shipped binaries is the next desk step: it says
+which component draws it and what condition gates it.
+
 ## Open work
 
 1. Note 8 (greatlte) touch: **works in iOS, then wedges after a few minutes of
