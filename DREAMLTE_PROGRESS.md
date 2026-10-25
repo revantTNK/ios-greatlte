@@ -1738,13 +1738,118 @@ Reading the code (no phone work yet) found two things:
   hash matched `3b9ddab0…6fcc`, pre-flash `sda7` prefix hash was
   `db3a5f8a…839b5f` (the previous 4 GiB image), `dd bs=1048576 conv=fsync`,
   `sync`, read-back hash identical. Boot result **not yet reported**.
-- **The ring from the previous 4 GiB native boot is gone.** TWRP's
-  `/sys/fs/pstore/` was empty (no `pmsg-ramoops-0`), so the
-  `vm_page_bootstrap:` count and `8/8 CPUs` line could not be pulled.
-  This matches the warning above: at 4 GiB both klog zones sit inside
-  XNU's RAM window and are ordinary memory once the VM allocator runs.
-  The 4 GiB free-page count therefore has no ring evidence; the boot
-  itself is the user's report.
+- **The pstore ring from the previous 4 GiB native boot is gone, the disk
+  ring was not.** TWRP's `/sys/fs/pstore/` was empty (no
+  `pmsg-ramoops-0`): at 4 GiB both klog zones sit inside XNU's RAM window
+  and are ordinary memory once the VM allocator runs. The SWEETLOG ring at
+  the end of USERDATA (last 1025 blocks of `sda24`) is unaffected and was
+  pulled after the next boot - that is where the free-page count and the
+  `8/8 CPUs` line come from below.
+
+### Display: the 1125x2436 boot shows a black screen (2026-10-25)
+
+User report: after the scaled image above was flashed, "the phone doesn't
+show iOS anymore, I'm met with a black screen". Pulled from TWRP with
+`tools/sweet-log.py`: `logs/sweetlog-4g-scale.txt` (300 047 bytes, flush #22)
+and `logs/pmsg-4g-scale.txt`. No writes were made to the phone.
+
+**Observation - the kernel, the panel and the presenter are all fine:**
+
+- `vm_page_bootstrap: 258468 free pages` (~4 GiB, first boot evidence) and
+  `8/8 CPUs initialized` with `SGI1 verified`.
+- `SWEET FB: AppleCLCD 1440x2960 stride 5760 at 0xcc000000, default surface
+  1, presented as 1125x2436` (line 77) - the new geometry is live.
+- `SWEET FB: staged present, stage 1125x2436, scaled to the panel height`
+  (line 1708); swaps 1-3 presented, `SWEET FB: display on` at 1690.
+- Touch is alive the whole time (`S8 TOUCH: down id=0 x=1063 y=1287`,
+  `SWEET HID: touch 0 down`).
+
+**Observation - SpringBoard aborts 14 times, starting at line 1824:**
+
+```
+uncaught exception 'NSInternalInconsistencyException', reason: 'Failed to
+load bounding path bitmap data from the asset manager for asset name:
+BoundingPathBitmap-1125x2436-375x812-3.00x'
+```
+
+First at 1824, then 2238, 2621, 2737, 3190, 3407 … 4709; all 14 share the
+backtrace `0x1a78484b8 0x1eb6caf54 0x1eb6bba4c 0x199cbeafc 0x1eb6ca424
+0x1eb6ccda0 0x1eb6ccd60 0x199cb9d58 0x19b1c1810 0x1a2c75ae8`. UIKit's own
+display description is `375x812@3x 60Hz sRGB SDR`, i.e. it accepts the new
+size as an iPhone X. Before the first abort SpringBoard reaches
+`SBStartupTransitionToLockOut` and starts building icon snapshots.
+
+**Conclusion (observation, not a guess):** the black screen is a userland
+crash loop, not a display failure. `SWEET FB: display off` at line 1746 is
+the last display-power event - backboardd never sends selector 12
+(`on`) because SpringBoard never finishes launching - so the panel stays
+faded to black even though the presenter is still copying frames.
+
+**What is *not* the cause.** The bounding path asset is not missing from the
+images on disk:
+
+- The format is `BoundingPathBitmap-%ldx%ld-%ldx%ld-%.2fx`, loaded from
+  `BoundingPathData.bundle` inside `UIKitCore.framework` by a
+  `UIAssetManager`; the two errors UIKitCore carries are "The bounding path
+  data manager should never be nil…" (manager) and "Failed to load bounding
+  path bitmap data from the asset manager for asset name: %@" (lookup).
+- Extracted the OS.dmg APFS (`7z x`, read-only, `/home/revant/greatlte-research/os-1627/`):
+  `System/Library/PrivateFrameworks/UIKitCore.framework/BoundingPathData.bundle/`
+  holds `Assets.car` (101 768 B), `BoundingPathData` (34 912 B Mach-O) and
+  `Info.plist`. `strings Assets.car` lists 95 bitmap names and **includes
+  `BoundingPathBitmap-1125x2436-375x812-3.00x`** (plus 320x693, 375x812 for
+  the other sizes, iPhone 8/XR/11/12/14 families).
+- The root image flashed to USERDATA (`/home/revant/ios-galaxy-s8/ios16-root.img`,
+  17 GiB, the 2026-10-22 `db8b0bd7…8f1f` build) contains the same bundle
+  with the same `Assets.car` (`7z l`, note the volume-name prefix
+  `iOSRoot/`).
+
+So the lookup fails at run time with the asset present on the filesystem.
+Which of (a) catalog traits/idiom mismatch, (b) bundle resolution through
+`UIKitCore.framework` (code lives only in the dyld shared cache),
+(c) asset-manager init, is **not established**. Not chased further because
+the same screen size is not what we want anyway.
+
+**Regression window.** Of the 25 rings kept in `logs/`, only
+`sweetlog-4g-scale.txt` mentions `BoundingPath` or `CRASH SpringBoard`. The
+comparable native boot, `logs/sweetlog-4g.txt` (4 GiB, 1440x2960, the one
+the user saw iOS on), reaches `SWEET FB: 100 presents at 163 s`, cycles
+`display on/off/on` three times and has no abort; it stops before
+`SBStartupTransitionToLockOut`, so it is a weaker comparison than it looks,
+but its retained portion is SpringBoard-busy (478 SpringBoard lines) and
+clean. This boot at 1125x2436 (375x812 pt @3x, exactly iPhone X) is the only
+one that asks for the asset and the only one that aborts. **Guess**
+(unverified): UIKit picks `_UIScreenComplexBoundingPathUtilities` when the
+display matches a notched device's metrics, and only that path needs the
+bitmap. The S8 p7-p9 boots also ran 1125x2436, but no raw rings were kept,
+so they neither confirm nor deny it.
+
+**Fix prepared - make the presented size a boot arg.** The logical size was
+a compile-time constant (patch 0061), so each trial size cost a kernel
+build. Commit `0c2ea33bf` adds `sweetfb_logical_w`/`sweetfb_logical_h`
+(default 1125x2436, capped at the panel) to `AppleCLCD::start`, rewrites
+`a5xelte_touch.c`'s `s8ts_scaled` mapping to use the presenter's own geometry
+(`out_w = lw * panel_h / lh`, centered) instead of the hard-coded 1125x2436
+numbers, and has `tools/dreamlte/make-boot.sh` derive the ADT canvas from
+those args. From then on a size trial is a boot image, not a CI run.
+CI run **40218102172** (`0c2ea33bf`, macOS 13.5, `A5XELTE`, DEVELOPMENT)
+succeeded (kernel 17 244 024 bytes, SHA-256 `15fb682f…a8d6`).
+
+**Next trial, flashed, not yet booted (2026-10-25):** 1080x2220 - exactly
+75 % of 1440x2960, same aspect, so `out_w = 1080 * 2960 / 2220 = 1440`
+exactly and the side bars disappear; 360x740 pt at 3x, not an Apple display
+size, so UIKit should take the rectangular path as it does at native. Boot
+image `shim/dreamlte/out/greatlte-4g-8core-logical-boot.img`, 16 975 888
+bytes, SHA-256 `6a096e69…46836`; ADT canvas 1080x2220, dram 4 GiB,
+`display-scale 3`; cmdline `… sweetfb_native=0 sweetfb_scale=1
+sweetfb_hz=60 sweetfb_logical_w=1080 sweetfb_logical_h=2220 …`. Written to
+BOOT `sda7` through TWRP on 2026-10-25 and read back identical (the image
+it replaced, `greatlte-4g-8core-scale-boot.img` `3b9ddab0…6fcc`, was
+verified in place first). Boot outcome not yet observed.
+
+**Revert path (unchanged, verified):** `greatlte-4g-8core-0126-boot.img`,
+16 975 888 bytes, SHA-256 `db3a5f8a…839b5f` (the 4 GiB native boot that
+showed iOS).
 
 ## Open work
 
