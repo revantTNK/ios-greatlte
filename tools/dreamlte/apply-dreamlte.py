@@ -259,6 +259,17 @@ edit('pexpert/arm/pe_serial.c', [
      '/*\n * Copy of the console in TWRP', 1),
 ])
 
+# 4 GiB RAM (Note 8 high bank 0x880000000-0x97fffffff) spans four 1 GiB L1
+# entries in start.s, which allocates one 4 KiB L2 table per entry for both
+# the V=P and KVA mapping: 2 L1 + 8 L2 = 10 pages. The 8-page default let the
+# last two pages land on topology_info and the topology cpu/cluster arrays in
+# __DATA_CONST, which ml_parse_cpu_topology() then read - a panic before the
+# console, with no ring and no pstore text. Same bound as ARM_LARGE_MEMORY.
+edit('osfmk/arm/pmap/pmap.h', [
+    ('#define BOOTSTRAP_TABLE_SIZE (ARM_PGBYTES * 8)\n',
+     '#define BOOTSTRAP_TABLE_SIZE (ARM_PGBYTES * 34)\n', 1),
+])
+
 # Boots 3, 5, 6 and 7 hung right after the kernel version line, before
 # pmap_startup's "init/release time"; boots 1, 2, 3b and 5b got past it with
 # the same image. The physical aperture slide (1 GiB range, early_random) is
@@ -291,6 +302,10 @@ edit('osfmk/arm64/arm_vm_init.c', [
      '#if defined(DREAMLTE) && !XNU_MONITOR\n'
      '\tphysmap_base = ROUND_TWIG(physmap_base);\n'
      '#endif\n', 1),
+    ('\tif (pages_used > BOOTSTRAP_TABLE_SIZE) {\n',
+     '\t/* BOOTSTRAP_TABLE_SIZE is a byte count; pages_used is a page count */\n'
+     '\tif (pages_used > (BOOTSTRAP_TABLE_SIZE / ARM_PGBYTES)) {\n', 1),
+
 ])
 
 edit('osfmk/vm/vm_resident.c', [

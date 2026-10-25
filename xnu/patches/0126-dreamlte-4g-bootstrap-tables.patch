@@ -1,0 +1,38 @@
+diff --git a/osfmk/arm/pmap/pmap.h b/osfmk/arm/pmap/pmap.h
+index df672c6..c96541f 100644
+--- a/osfmk/arm/pmap/pmap.h
++++ b/osfmk/arm/pmap/pmap.h
+@@ -112,7 +112,18 @@
+  */
+ #define BOOTSTRAP_TABLE_SIZE (ARM_PGBYTES * 34)
+ #else /* defined(ARM_LARGE_MEMORY) */
+-#define BOOTSTRAP_TABLE_SIZE (ARM_PGBYTES * 8)
++/*
++ * Same bound as the ARM_LARGE_MEMORY case.  start.s allocates one 4 KiB L2
++ * table per 1 GiB L1 entry touched, for both the V=P and the KVA mapping, so
++ * the old 8-page table only covered a 2 GiB window spanning three L1 entries.
++ * The Exynos 8895 port can hand XNU 4 GiB (Note 8 high bank
++ * 0x880000000-0x97fffffff); that window spans four L1 entries and needs
++ * 2 L1 + 8 L2 = 10 pages.  The two pages written past the array landed on
++ * topology_info, topology_cpu_array and topology_cluster_array in
++ * __DATA_CONST, which ml_parse_cpu_topology() read as CPU and cluster counts
++ * and pointers before the first boot reached the console.
++ */
++#define BOOTSTRAP_TABLE_SIZE (ARM_PGBYTES * 34)
+ #endif /* defined(ARM_LARGE_MEMORY) */
+ 
+ typedef uint64_t tt_entry_t; /* translation table entry type */
+diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
+index d89b0f1..657362c 100644
+--- a/osfmk/arm64/arm_vm_init.c
++++ b/osfmk/arm64/arm_vm_init.c
+@@ -1921,7 +1921,8 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+ 	size_t l1_entries = 1 + ((bytes_mapped + ARM_TT_L1_SIZE - 1) / ARM_TT_L1_SIZE);
+ 	/* 1 L1 each for V=P and KVA, plus 1 page for each L2 */
+ 	size_t pages_used = 2 * (l1_entries + 1);
+-	if (pages_used > BOOTSTRAP_TABLE_SIZE) {
++	/* BOOTSTRAP_TABLE_SIZE is a byte count; pages_used is a page count */
++	if (pages_used > (BOOTSTRAP_TABLE_SIZE / ARM_PGBYTES)) {
+ 		panic("BOOTSTRAP_TABLE_SIZE too small for memory config");
+ 	}
+ #endif

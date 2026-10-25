@@ -1549,9 +1549,52 @@ TWRP's pmsg zone still held the dead kernel's console tail.
   195 965 bytes), i.e. the panic happened before the SWEETLOG thread and
   before `fbcon_probe`/`klog_init`, so XNU wrote nothing anywhere readable:
   no ring, no pstore text, no new loader log. Same shape as the c13 2 GiB
-  panics - a screen photo is the only capture path. **Cause unknown (not
-  guessed at yet)**; the candidates are kmem claim placement and page-array
-  /pmap sizing at 262 144 pages, both of which need the panic text.
+  panics - a screen photo is the only capture path.
+- **Root cause found in the xnu-8796.141.3 source (2026-10-25; reasoning, not
+  yet confirmed on the phone).** The bootstrap page tables are too small for
+  a 4 GiB window, and the overflow lands on globals the CPU-topology parse
+  reads.
+  - `osfmk/arm64/start.s` maps from the kernel mach header PA to the end of
+    RAM with 2 MiB block entries, `entries = (memSize - (header_pa -
+    phys_base)) >> 21`. Our loader puts the header at `0x881004000`, so at
+    4 GiB that is 2039 entries covering L1 entries 34-37.
+    `create_bootstrap_mapping` takes a fresh 4 KiB L2 page for every L1 entry
+    it crosses, once for the V=P map and once for the KVA map: **2 L1 + 8 L2
+    = 10 pages**. `BOOTSTRAP_TABLE_SIZE` is `ARM_PGBYTES * 8` here (our build
+    has no `ARM_LARGE_MEMORY`, no KTRR/CTRR), so the last two pages are
+    written **past the array**. At 2 GiB the same arithmetic gives 1015
+    entries over L1 entries 34-35 = 6 pages, which is why 2 GiB has always
+    booted.
+  - The victims are in `__DATA_CONST` right after the array, verified with
+    `llvm-nm` on the CI kernel: page `0xfffffff007182000` holds
+    `_avail_end`, `_real_avail_end`, `_first_avail`, `_vm_kernel_slide`,
+    `_cpu_config_correct`, `_topology_cpu_array`,
+    `_topology_cluster_array` and `_topology_info`. The first two of those
+    are ones `arm_vm_init` reassigns before use, but `topology_info` still
+    holds its static initialiser (`num_cpus`, `num_clusters`, `cpus`,
+    `clusters` pointers). `ml_parse_cpu_topology()` reads
+    `topology_info.num_cpus` before writing it, sees a block descriptor,
+    breaks out of the EDT loop at once and then walks `topology_info.cpus`
+    / `.clusters` as pointers. That happens well before `fbcon_probe` and
+    `klog_init`, which is exactly the observed silence.
+  - The DEVELOPMENT sanity check that should have caught it
+    (`arm_vm_init.c`, "BOOTSTRAP_TABLE_SIZE too small for memory config")
+    is a units bug: it compares a page count (`pages_used`, 10) against a
+    byte count (`BOOTSTRAP_TABLE_SIZE`, 32 768), so it can never fire.
+  - **Fix written:** `xnu/patches/0126-dreamlte-4g-bootstrap-tables.patch`
+    (mirrored in `tools/dreamlte/apply-dreamlte.py`) raises
+    `BOOTSTRAP_TABLE_SIZE` to the `ARM_LARGE_MEMORY` bound (34 pages, up to
+    16 GiB of 1 GiB entries) and makes the check compare bytes. Patch
+    applies cleanly to a pristine xnu-8796.141.3 tree (`git apply --check`);
+    **kernel not yet built**.
+  - **3 GiB image built, not flashed:** 3072 MiB needs exactly 8 pages (map
+    ends `0x93fe04000`, three L1 entries), so it should boot with the
+    *current* kernel - a free confirmation of the arithmetic before spending
+    a CI run, and 1 GiB more than we run now. 3200 MiB (3.125 GiB) is the
+    first size that overflows. Image
+    `shim/dreamlte/out/greatlte-3g-8core-boot.img`, **16 861 200 bytes**,
+    SHA-256
+    `fe210fc0ea6179735343ad6668dbaf2f334d6932cfed7f25ec114affe7d4cd73`.
 - **What a boot should show:** `vm_page_bootstrap:` about 258 000-262 000
   free pages (4 GiB at 16 KiB pages, versus 127 919 at 2 GiB), the
   `S8 KMEM:` claims line roughly unchanged (hole a little smaller because
@@ -1616,11 +1659,13 @@ TWRP's pmsg zone still held the dead kernel's console tail.
 2. Boot the latest kernel/loader: does the frame-done copy remove the tearing,
    and does the new Mongoose order start core 0x000?
 3. Mongoose: **8/8 boots and works** (`cpus=8`, ring
-   `logs/sweetlog-8core.txt`, 1066 MHz per Mongoose core). BOOT now carries
-   4 GiB + 8 cores ("RAM to 4 GiB on the Note 8") and that image **panics
-   inside XNU before the console** - loader log clean, ring unchanged, so
-   the next step is the panic text off the screen. Then L2/non-CPU power,
-   the A53 clock (1689 MHz worked in c10; daily setting 1690/1703) and GPU.
+   `logs/sweetlog-8core.txt`, 1066 MHz per Mongoose core). 4 GiB + 8 cores
+   first panicked before the console; the cause is found in the source (the
+   bootstrap page tables are 8 pages, a 4 GiB window needs 10 - see "RAM to
+   4 GiB on the Note 8") and patch 0126 is written but **not yet built or
+   booted**. Open: build the 0126 kernel, boot 4 GiB, and (optionally) boot
+   the ready 3 GiB image as a no-CI confirmation. Then L2/non-CPU power, the
+   A53 clock (1689 MHz worked in c10; daily setting 1690/1703) and GPU.
    Multi-range physical memory (the two low GiB) would need pmap work and is
    not planned yet.
 4. Zero-copy scanout through the DPU IDMA (needs the SFR update to take effect).
