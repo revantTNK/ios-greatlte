@@ -1376,13 +1376,62 @@ TWRP's pmsg zone still held the dead kernel's console tail.
   the 100 ms INT_STATUS wait) is not known without the ring; the wedge may
   also have run the kick and failed, which only the log can say. Treat the
   longer uptime as a report, not yet a measurement.
+- **Observation (ring pulled 2026-10-25, `logs/sweetlog-ts-buskick.txt`,
+  217 589 bytes, flush #119, 3823 lines):** this is the bus-kick boot, and
+  the three diagnostics did their job.
+  - Boot baseline, `S8 TOUCH: boot regs (0)` (line 111-115):
+    ```
+    ctl 0x9 trail 0xf int_en 0 int 0 fifo 0x1000100
+    conf 0x9803c1ff auto 0x300ff trans 0x700 timeout 0xff addr 0xff0fffff
+    pclk 0x300000 sclk 0x300000 usermux 0 sysreg 0x3
+    topmux 0x1 div 0x3 gate 0x200000
+    gpe3 con 0x110022 dat 0xf3 pud 0x5000 gpa1 dat 0
+    ```
+    Healthy SDA is **high** (`dat 0xf3`); `gpa1 dat 0` (IRQ asserted) is
+    normal right after the IC's report, so that field is not a wedge symptom.
+  - Compared field by field with the wedge dump (line 3785-3789), **only two
+    registers differ**: `trans 0x700` vs `0xa3070c`, and `gpe3 dat 0xf3` vs
+    `0xf2`. Every clock, mux, gate, pad-function, pull and controller
+    configuration field is identical to the healthy baseline, so nothing in
+    the clock/USI/pin setup changes when the bus wedges - it is a data-line
+    state, not a configuration state.
+  - The ladder ran as designed: `event read failed (3..8) stage write-done
+    byte 255 int 0x0`, then `probe (32)` failed twice, `probe (64)` failed
+    twice, then the dump, then
+    `bus kick: dat 0xf2, after dat 0xf3` and
+    `bus recover (64): gpe3 con 0x110022 dat 0xf3 gate 0x200000 int 0`.
+  - **The kick worked.** The very next probe answered on the same line pair:
+    `probe (64): ts status 00 02 01 00` and `id22 5345b66100`, followed by
+    `event overflow (left 63), clearing stack`. This is the first boot where
+    a wedged bus was recovered at the electrical level; the sysreg boot's
+    probes 96-224 all failed.
+  - `after dat 0xf3` was read with both pads released to **input**, so the
+    high level came from the pull-up: the line was genuinely free, not held
+    by our pad. What the ring cannot say is *which* step freed it - the nine
+    SCL clocks with SDA as an input, or switching the pad off function 2
+    (an aborted controller transfer may leave the pad driving low). One extra
+    `dat` print immediately after the clocks, before SDA is ever driven,
+    settles it.
+  - **But touch did not come back for the user**, and the ring says why it
+    is not a bus problem: after the recovery there is not one further
+    read/probe failure in the remaining ~30 lines - the driver considered the
+    IC healthy to the end. The IC answered registers yet produced no usable
+    events (overflow cleared once, then nothing), while hardware keys kept
+    working (`A5XELTE KEYS`, `SWEET HID: key 0x30`). Guess: the IC's
+    event/firmware path stays stuck after a wedge even when the bus is
+    cleared, or SpringBoard's HID touch service stopped receiving reports.
+    The ring ends with the hang sampler still printing (`SMP --- sample 9`)
+    before the reboot into TWRP.
+  - Timing: the last frame line before the wedge is `SWEET FB: 900 presents
+    at 1144 s`, and the wedge dump is ~80 lines later, so the wedge happened
+    **after ~19 minutes of uptime** - much later than the sysreg boot, and
+    this boot was `cpus=4` (`4/4 CPUs initialized`).
 - **Guess:** the 20 ms abort was part of it - a transfer aborted at 20 ms
-  leaves SDA low exactly as dumped - so raising the wait removes some
+  leaves SDA low exactly as dumped - so raising the wait removed some
   wedges, while the ones during sustained touch input (event/firmware work)
-  still exceed 100 ms or crash the IC. The PMIC rail cycle is the next lever.
-- **When the ring is pulled, look for:** `boot regs (0)` vs `wedge (N)`
-  (any field that differs), and whether `bus kick: … after dat 0x…` has bit
-  0 set and whether the following `probe` answers.
+  still exceed 100 ms or crash the IC. The observation above shifts the next
+  lever: the bus is now recoverable, so what needs work is getting the IC's
+  event stream back after a kick (IC reset, not a PMIC rail cycle).
 
 ### Eight cores again (2026-10-25)
 
@@ -1444,11 +1493,14 @@ TWRP's pmsg zone still held the dead kernel's console tail.
    and boot-time register baseline described in "SYSREG image boots clean,
    touch still wedges" were built (CI 40139011852) and **flashed to BOOT
    `sda7`** (`greatlte-ts-buskick-boot.img`, `d4091780…6140`, read back
-   identical). **First boot (user report):** touch lasted much longer, then
-   wedged while editing apps on the homescreen; the ring has not been pulled,
-   so `boot regs` / `bus kick` / `after dat` are still unread. The current
-   BOOT is being switched to the 8-core image (next section); the bus-kick
-   image can be flashed back to continue touch. Note that
+   identical). **First boot, ring pulled and analysed:** touch lasted much
+   longer (wedge after ~19 min of uptime, `cpus=4`), the wedge dump is
+   identical to the healthy boot baseline except `trans` and SDA-low, the
+   **bus kick raised SDA (`dat 0xf2` -> `0xf3`) and the next probe answered**,
+   but the IC produced no further touch events. Details in "SYSREG image
+   boots clean". The current BOOT is being switched to the 8-core image
+   (next section); the bus-kick image can be flashed back to continue touch.
+   Note that
    `logs/sweetlog-busfix.txt` predates the flash (it is an old-kernel boot;
    see the correction above).
    The 2 GiB RAM question is closed: `greatlte-ts-overflow-2g-cmp-boot.img`
