@@ -1537,8 +1537,21 @@ TWRP's pmsg zone still held the dead kernel's console tail.
 - **Flashed 2026-10-25** (TWRP, serial `988d…13230`): on-phone hash matched
   `3a568a86…79b4a3e0`; pre-flash `sda7` read `9ebd6555…5d0b` (the 8-core
   2 GiB image); `dd` 16+1 records, rc=0, `sync` rc=0; read-back of
-  16 861 200 bytes hashed `3a568a86…79b4a3e0`, identical. **Not yet
-  booted.**
+  16 861 200 bytes hashed `3a568a86…79b4a3e0`, identical.
+- **First boot panicked (2026-10-25, user report + logs):** the phone
+  panicked "way before it got anywhere worthwhile". The **loader did its
+  job** - `logs/pmsg-4g.txt` (pulled in TWRP, 5692 bytes) shows
+  `phys=0x880000000 mem=0x100000000`, `zeroing XNU RAM...` / `zeroed`, all
+  10 segments at `0x8810xxxxx`, `adt_pa=0x8828b8000`,
+  `boot_args=0x8828bb000`, `entry_pa=0x881428488`, the `cpus=8` cmdline,
+  and `JUMP TO XNU`. So the handoff is correct and the failure is inside
+  XNU. The ring is **unchanged from the previous 8-core boot** (flush #51,
+  195 965 bytes), i.e. the panic happened before the SWEETLOG thread and
+  before `fbcon_probe`/`klog_init`, so XNU wrote nothing anywhere readable:
+  no ring, no pstore text, no new loader log. Same shape as the c13 2 GiB
+  panics - a screen photo is the only capture path. **Cause unknown (not
+  guessed at yet)**; the candidates are kmem claim placement and page-array
+  /pmap sizing at 262 144 pages, both of which need the panic text.
 - **What a boot should show:** `vm_page_bootstrap:` about 258 000-262 000
   free pages (4 GiB at 16 KiB pages, versus 127 919 at 2 GiB), the
   `S8 KMEM:` claims line roughly unchanged (hole a little smaller because
@@ -1604,10 +1617,12 @@ TWRP's pmsg zone still held the dead kernel's console tail.
    and does the new Mongoose order start core 0x000?
 3. Mongoose: **8/8 boots and works** (`cpus=8`, ring
    `logs/sweetlog-8core.txt`, 1066 MHz per Mongoose core). BOOT now carries
-   4 GiB + 8 cores ("RAM to 4 GiB on the Note 8"), not yet booted. Then
-   L2/non-CPU power, the A53 clock (1689 MHz worked in c10; daily setting
-   1690/1703) and GPU. Multi-range physical memory (the two low GiB) would
-   need pmap work and is not planned yet.
+   4 GiB + 8 cores ("RAM to 4 GiB on the Note 8") and that image **panics
+   inside XNU before the console** - loader log clean, ring unchanged, so
+   the next step is the panic text off the screen. Then L2/non-CPU power,
+   the A53 clock (1689 MHz worked in c10; daily setting 1690/1703) and GPU.
+   Multi-range physical memory (the two low GiB) would need pmap work and is
+   not planned yet.
 4. Zero-copy scanout through the DPU IDMA (needs the SFR update to take effect).
 5. Vibration, backlight, Wi-Fi (BCM4361).
 6. Housekeeping: `NOTES.md` and `A5XELTE_PROGRESS.md` moved to `docs/history/` as donor history.
